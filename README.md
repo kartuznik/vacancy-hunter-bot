@@ -42,45 +42,22 @@ cp .env.example .env
 
 ## systemd
 
-Юниты рассчитаны на каталог `/opt/bots/vacancy-hunter`. Таймер запускает одноразовый сервис каждые три часа.
-
-`vacancy-hunter.service`:
-
-```ini
-[Unit]
-Description=Vacancy hunter one-shot
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=/opt/bots/vacancy-hunter
-EnvironmentFile=/opt/bots/vacancy-hunter/.env
-ExecStart=/opt/bots/vacancy-hunter/.venv/bin/python /opt/bots/vacancy-hunter/hunter.py
-```
-
-`vacancy-hunter.timer`:
-
-```ini
-[Unit]
-Description=Run vacancy hunter every 3 hours
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=3h
-Persistent=true
-Unit=vacancy-hunter.service
-
-[Install]
-WantedBy=timers.target
-```
+Юниты лежат в корне репозитория: `vacancy-hunter.service` и `vacancy-hunter.timer`. Таймер запускает одноразовый сервис каждые 4 часа (`OnCalendar=*-*-* 00/4:00:00`). `Persistent=true` догоняет пропущенный запуск после простоя. Сервис стартует интерпретатором из `.venv` и сам читает `.env` из корня репозитория.
 
 Установка:
 
 ```bash
 sudo cp vacancy-hunter.service vacancy-hunter.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now vacancy-hunter.timer
+sudo systemctl enable vacancy-hunter.timer
+sudo systemctl start vacancy-hunter.timer
 ```
 
-Шаблоны выше лежат в этом README. Перед копированием сохраните их в одноимённые файлы.
+Управление:
+
+```bash
+systemctl status vacancy-hunter.timer --no-pager
+systemctl start vacancy-hunter.timer
+systemctl stop vacancy-hunter.timer
+journalctl -u vacancy-hunter.service -n 15 --no-pager
+```

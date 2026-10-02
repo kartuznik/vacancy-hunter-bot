@@ -1,0 +1,11 @@
+[Unit]
+Description=Vacancy hunter one-shot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bots/vacancy-hunter
+ExecStart=/opt/bots/vacancy-hunter/.venv/bin/python /opt/bots/vacancy-hunter/hunter.py
+Restart=on-failure
+RestartSec=30
