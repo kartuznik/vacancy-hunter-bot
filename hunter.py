@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, datetime, timezone
-from html import escape
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -17,6 +16,7 @@ from vacancy_hunter.database import SeenStore, default_db_path
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.habr_parser import fetch_habr
 from vacancy_hunter.hh_parser import fetch_hh
+from vacancy_hunter.report import build_stats, relevance_label, render_markdown, telegram_blocks
 from vacancy_hunter.tg_scraper import fetch_telegram
 
 logger = logging.getLogger(__name__)
@@ -37,19 +37,21 @@ def main() -> None:
     if args.stats:
         new_items = _unseen(passed, _open_store_if_exists())
         _print_stats(collected, rejected, passed, new_items)
-        _print_vacancies(passed if args.all else passed[:TOP_N], "Прошедшие фильтр")
+        shown = passed if args.all else passed[:TOP_N]
+        _print_vacancies(shown, "Прошедшие фильтр")
         return
 
     store = SeenStore()
     new_items = _unseen(passed, store)
     selected = new_items if args.all else new_items[:TOP_N]
+    stats = build_stats(collected, rejected, passed, new_items)
 
     for item in selected:
         store.remember(item["source"], item["url"], item["title"], item["score"])
 
-    digest_path = _write_digest(selected)
+    digest_path = _write_digest(selected, stats)
     logger.info("Дайджест записан: %s", digest_path.name)
-    _send_telegram(settings.telegram_bot_token, settings.chat_id, selected)
+    _send_telegram(settings.telegram_bot_token, settings.chat_id, selected, stats)
     _print_vacancies(selected, "Новые вакансии")
 
 
@@ -115,46 +117,25 @@ def _apply_filter(collected: dict[str, list[dict]]) -> tuple[list[dict], int]:
                 continue
             enriched = dict(item)
             enriched["score"] = scored.score
+            enriched["source_type"] = enriched.get("source_type") or enriched.get("source")
+            enriched["channel_name"] = enriched.get("channel_name") or ""
+            enriched["matched_whitelist_words"] = list(scored.whitelist_hits)
             passed.append(enriched)
     return passed, rejected
 
 
-def _write_digest(items: list[dict]) -> Path:
+def _write_digest(items: list[dict], stats) -> Path:
     directory = ROOT / "digests"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"digest_{date.today().isoformat()}.md"
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        f"# Дайджест вакансий {date.today().isoformat()}",
-        "",
-        f"Сформирован: {generated}",
-        "",
-    ]
-    if not items:
-        lines.append("Новых вакансий нет.")
-    for index, item in enumerate(items, start=1):
-        title = " ".join((item.get("title") or "").split())
-        description = (item.get("description") or "").strip()
-        excerpt = description[:500]
-        salary = item.get("salary") or "не указана"
-        lines.extend(
-            [
-                f"## {index}. {title}",
-                "",
-                f"- Источник: {item.get('source')}",
-                f"- Оценка: {item.get('score')}",
-                f"- Зарплата: {salary}",
-                f"- Ссылка: {item.get('url')}",
-                "",
-                excerpt or "Описание отсутствует.",
-                "",
-            ]
-        )
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text(
+        render_markdown(items, stats, day=date.today().isoformat()),
+        encoding="utf-8",
+    )
     return path
 
 
-def _send_telegram(token: str, chat_id: str, items: list[dict]) -> None:
+def _send_telegram(token: str, chat_id: str, items: list[dict], stats) -> None:
     if not items:
         logger.info("Новых вакансий нет, Telegram пропущен")
         return
@@ -162,7 +143,7 @@ def _send_telegram(token: str, chat_id: str, items: list[dict]) -> None:
         logger.warning("TELEGRAM_BOT_TOKEN или CHAT_ID пуст, отправка пропущена")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for chunk in _chunk_messages([_card(item) for item in items]):
+    for chunk in _chunk_messages(telegram_blocks(items, stats)):
         try:
             response = requests.post(
                 url,
@@ -182,18 +163,6 @@ def _send_telegram(token: str, chat_id: str, items: list[dict]) -> None:
             return
 
 
-def _card(item: dict) -> str:
-    title = escape(" ".join((item.get("title") or "").split()))
-    salary = escape(item.get("salary") or "не указана")
-    link = escape(item.get("url") or "")
-    return (
-        f"<b>{title}</b>\n"
-        f"Оценка: {item.get('score')}\n"
-        f"Зарплата: {salary}\n"
-        f"Ссылка: {link}"
-    )
-
-
 def _chunk_messages(blocks: list[str]) -> list[str]:
     chunks: list[str] = []
     current = ""
@@ -211,18 +180,21 @@ def _chunk_messages(blocks: list[str]) -> list[str]:
 
 def _print_vacancies(items: list[dict], title: str) -> None:
     table = Table(title=title)
-    table.add_column("Оценка", justify="right")
+    table.add_column("Уровень")
     table.add_column("Источник")
+    table.add_column("Канал")
+    table.add_column("Совпадения")
     table.add_column("Название")
-    table.add_column("Зарплата")
-    table.add_column("Ссылка")
+    table.add_column("Оценка", justify="right")
     for item in items:
+        words = ", ".join(item.get("matched_whitelist_words") or [])
         table.add_row(
-            str(item.get("score")),
-            str(item.get("source")),
+            relevance_label(int(item.get("score") or 0)),
+            str(item.get("source_type") or item.get("source") or ""),
+            str(item.get("channel_name") or "—"),
+            words,
             str(item.get("title")),
-            str(item.get("salary") or "—"),
-            str(item.get("url")),
+            str(item.get("score")),
         )
     Console().print(table)
 

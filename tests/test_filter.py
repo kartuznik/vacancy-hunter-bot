@@ -13,6 +13,7 @@ import requests
 from vacancy_hunter.database import SeenStore, default_db_path
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.hh_parser import fetch_hh
+from vacancy_hunter.report import build_stats, relevance_label, render_markdown, telegram_blocks
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
@@ -193,3 +194,98 @@ def test_default_db_path_follows_package_parent():
     repo_root = Path(__file__).resolve().parents[1]
     assert path.parent.parent == repo_root
     assert path.parts[-2:] == ("data", "seen_vacancies.db")
+
+
+def test_relevance_boundaries():
+    assert relevance_label(101) == "🔥 HIGH"
+    assert relevance_label(100) == "⚡ MEDIUM"
+    assert relevance_label(50) == "⚡ MEDIUM"
+    assert relevance_label(49) == "📄 LOW"
+
+
+def _sample_vacancies() -> list[dict]:
+    description = ("описание " * 60) + "TAIL_MARKER"
+    return [
+        {
+            "source": "telegram",
+            "source_type": "telegram",
+            "channel_name": "geekjobs",
+            "title": "Стажёр",
+            "score": 40,
+            "url": "https://t.me/geekjobs/1",
+            "salary": "",
+            "description": "короткий текст",
+            "matched_whitelist_words": ["python"],
+        },
+        {
+            "source": "hh",
+            "source_type": "hh",
+            "channel_name": "",
+            "title": "Python в продукт",
+            "score": 120,
+            "url": "https://hh.ru/vacancy/1",
+            "salary": "100000",
+            "description": description,
+            "matched_whitelist_words": ["python", "fastapi"],
+        },
+        {
+            "source": "telegram",
+            "source_type": "telegram",
+            "channel_name": "forpython",
+            "title": "Django стажёр",
+            "score": 80,
+            "url": "https://t.me/forpython/2",
+            "salary": "",
+            "description": "django remote",
+            "matched_whitelist_words": ["django"],
+        },
+        {
+            "source": "habr",
+            "source_type": "habr",
+            "channel_name": "",
+            "title": "Docker для сервиса",
+            "score": 60,
+            "url": "https://career.habr.com/vacancies/1",
+            "salary": "",
+            "description": "docker",
+            "matched_whitelist_words": ["docker"],
+        },
+    ]
+
+
+def test_digest_groups_sources_channels_and_matches():
+    items = _sample_vacancies()
+    stats = build_stats(
+        {"hh": [{}, {}], "habr": [{}], "telegram": [{}, {}, {}]},
+        rejected=7,
+        passed=items,
+        new_items=items[:2],
+    )
+    text = render_markdown(items, stats, day="2026-10-02")
+    hh = text.index("🟢 HH.ru")
+    habr = text.index("🔵 Habr Career")
+    telegram = text.index("🟣 Telegram")
+    assert hh < habr < telegram
+    assert text.index("### forpython") < text.index("### geekjobs")
+    assert "Совпадения: python, fastapi" in text
+    assert "🔥 HIGH" in text
+    long_description = items[1]["description"]
+    assert long_description[:500] in text
+    assert "TAIL_MARKER" not in text
+    assert "Всего собрано: 6" in text
+    assert "Отсеяно фильтром: 7" in text
+    assert "Прошло фильтр: 4" in text
+    assert "Новых: 2" in text
+    assert "HH.ru — 2" in text
+    assert "Habr — 1" in text
+    assert "Telegram — 3" in text
+    top = text.split("### Топ-3 по скору", 1)[1]
+    assert top.index("Python в продукт") < top.index("Django стажёр") < top.index("Docker для сервиса")
+    assert "Стажёр" not in top
+
+    telegram_text = "\n\n".join(telegram_blocks(items, stats))
+    assert telegram_text.index("🟢 HH.ru") < telegram_text.index("🔵 Habr Career") < telegram_text.index("🟣 Telegram")
+    assert telegram_text.index("forpython") < telegram_text.index("geekjobs")
+    assert "Совпадения: django" in telegram_text
+    assert long_description[:120] not in telegram_text
+    assert "Топ-3 по скору" in telegram_text

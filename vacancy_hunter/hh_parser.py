@@ -81,6 +81,8 @@ def _parse_item(item: dict) -> dict | None:
     ).strip()
     return {
         "source": "hh",
+        "source_type": "hh",
+        "channel_name": "",
         "id": str(item.get("id") or ""),
         "title": title,
         "url": url,

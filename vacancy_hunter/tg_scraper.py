@@ -86,6 +86,8 @@ def _parse_message(channel: str, message) -> dict | None:
     title = _title_from_text(text)
     return {
         "source": "telegram",
+        "source_type": "telegram",
+        "channel_name": channel,
         "id": (message.get("data-post") or "").strip(),
         "title": title[:180],
         "url": url,

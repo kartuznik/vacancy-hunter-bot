@@ -54,6 +54,8 @@ def _parse_entry(entry) -> dict | None:
     guid = (getattr(entry, "guid", "") or getattr(entry, "id", "") or url).strip()
     return {
         "source": "habr",
+        "source_type": "habr",
+        "channel_name": "",
         "id": guid,
         "title": title,
         "url": url,
