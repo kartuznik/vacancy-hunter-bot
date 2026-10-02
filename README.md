@@ -1,0 +1,94 @@
+# vacancy-hunter
+
+Локальный сбор удалённых вакансий с HeadHunter, публичных Telegram-каналов и RSS Хабр Карьеры. Поиск идёт обычными HTTP-запросами. На этапе отбора LLM не вызывается: решение принимает детерминированный фильтр по спискам слов и баллам.
+
+## Архитектура
+
+Корень репозитория — каталог с `hunter.py`. Вся предметная логика лежит в пакете `vacancy_hunter/`.
+
+1. `hh_parser.py` делает `GET https://api.hh.ru/vacancies` по каждой фразе из `HH_QUERIES`. Параметры: `text`, `schedule=remote`, `order_by=publication_time`, `per_page=50`, `period=3`. Таймаут 10 секунд. Ответы `403` и `429` пишутся в лог, по этому запросу возвращается пустой список, остальные источники продолжают работу.
+2. `tg_scraper.py` забирает HTML `https://t.me/s/<channel>` и через BeautifulSoup достаёт текст поста, дату и ссылку на сообщение. Короткие служебные блоки отбрасываются.
+3. `habr_parser.py` скачивает RSS и разбирает его библиотекой `feedparser`.
+4. `filter_and_score.py` смотрит название, описание и зарплату. Любое слово из `blacklist_hard` (границы слов, без учёта регистра) сразу отсекает вакансию. Если нет ни одного слова из `whitelist`, вакансия тоже отсекается. Иначе начисляются баллы: `+30` за whitelist один раз, `+20` за junior / «без опыта» / стажёра, `+15` за явную удалёнку, `+10` если публикация моложе 24 часов, `−15` за каждое уникальное совпадение `blacklist_soft`.
+5. `database.py` хранит уже показанные вакансии в SQLite. Ключ — SHA-256 от строки `источник + url`. Файл базы считается как `Path(__file__).resolve().parent.parent / "data" / "seen_vacancies.db"`. Каталог `data/` создаётся при первом запуске.
+6. `hunter.py` собирает три источника, фильтрует, записывает только новые строки, кладёт `digests/digest_YYYY-MM-DD.md` (в карточке первые 500 символов описания) и отправляет топ-10 владельцу методом `POST` на `api.telegram.org`. Локально печатает таблицу через `rich`.
+
+С `--all` в дайджест и Telegram попадают все новые вакансии, а не десять лучших. С `--stats` скрипт только печатает сводку и таблицу: база, файл дайджеста и Telegram не трогаются.
+
+## Настройка .env
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+```
+
+Секции в `.env`:
+
+| Переменная | Смысл |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Токен бота от @BotFather |
+| `CHAT_ID` | Числовой id чата, куда слать карточки |
+| `HH_QUERIES` | Фразы для HH через запятую |
+| `TG_CHANNELS` | Имена каналов через запятую, без `https://t.me/` |
+| `HABR_RSS` | Адрес ленты. Рабочий URL: `https://career.habr.com/vacancies/rss?remote=true&q=python` |
+
+Файл `.env`, каталоги `data/` и `digests/` перечислены в `.gitignore`.
+
+## Запуск
+
+```bash
+.venv/bin/python hunter.py --stats
+.venv/bin/python hunter.py
+.venv/bin/python hunter.py --all
+.venv/bin/pytest
+```
+
+`--stats` удобен для проверки с этой машины: `api.hh.ru` может ответить `403` (ddos-guard). Парсер логирует предупреждение и не роняет проход. Telegram и Хабр при этом обрабатываются как обычно.
+
+Карточка в Telegram содержит название, оценку, зарплату и ссылку. Если токен или chat id пустые, отправка пропускается, таблица в консоли всё равно печатается.
+
+## systemd
+
+Юниты рассчитаны на каталог `/opt/bots/vacancy-hunter`. Таймер запускает одноразовый сервис каждые три часа.
+
+`vacancy-hunter.service`:
+
+```ini
+[Unit]
+Description=Vacancy hunter one-shot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bots/vacancy-hunter
+EnvironmentFile=/opt/bots/vacancy-hunter/.env
+ExecStart=/opt/bots/vacancy-hunter/.venv/bin/python /opt/bots/vacancy-hunter/hunter.py
+```
+
+`vacancy-hunter.timer`:
+
+```ini
+[Unit]
+Description=Run vacancy hunter every 3 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=3h
+Persistent=true
+Unit=vacancy-hunter.service
+
+[Install]
+WantedBy=timers.target
+```
+
+Установка:
+
+```bash
+sudo cp vacancy-hunter.service vacancy-hunter.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vacancy-hunter.timer
+```
+
+Шаблоны выше лежат в этом README. Перед копированием сохраните их в одноимённые файлы.
