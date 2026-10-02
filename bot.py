@@ -12,7 +12,7 @@ from aiogram.types import BotCommand, CallbackQuery, FSInputFile, InlineKeyboard
 
 from config import get_settings
 from vacancy_hunter.core import latest_digest, run_search
-from vacancy_hunter.database import SeenStore, default_db_path
+from vacancy_hunter.database import SeenStore, default_db_path, normalize_channel
 from vacancy_hunter.health import build_health_report
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ COMMANDS = (
     BotCommand(command="help", description="Справка по командам"),
     BotCommand(command="health", description="Самодиагностика системы"),
     BotCommand(command="stats", description="Статистика поиска"),
+    BotCommand(command="add_channel", description="Добавить канал поиска"),
+    BotCommand(command="remove_channel", description="Отключить канал поиска"),
+    BotCommand(command="list_channels", description="Список активных каналов"),
 )
 
 HELP_TEXT = (
@@ -34,7 +37,10 @@ HELP_TEXT = (
     "/download — скачать последний дайджест\n"
     "/help — эта справка\n"
     "/health — самодиагностика системы\n"
-    "/stats — статистика поиска по базе"
+    "/stats — статистика поиска по базе\n"
+    "/add_channel имя — добавить канал\n"
+    "/remove_channel имя — отключить канал\n"
+    "/list_channels — активные каналы и находки за 7 дней"
 )
 
 dispatcher = Dispatcher()
@@ -108,6 +114,84 @@ async def download_current(query: CallbackQuery) -> None:
         return
     await query.answer()
     await query.message.answer_document(FSInputFile(stored))
+
+
+def _is_owner(message: Message) -> bool:
+    owner = get_settings().chat_id.strip()
+    return bool(owner) and str(message.chat.id) == owner
+
+
+@dispatcher.message(Command("add_channel"))
+async def add_channel_command(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Команда доступна только владельцу.")
+        return
+    argument = _command_argument(message.text)
+    if not argument:
+        await message.answer("Укажите имя: /add_channel имя_канала")
+        return
+    status = SeenStore().add_channel(argument)
+    if status == "invalid":
+        await message.answer("Имя канала не прошло проверку. Нужна латиница, можно _, длина 5–32.")
+        return
+    if status == "reactivated":
+        await message.answer(f"Канал {normalize_channel(argument)} снова активен.")
+        return
+    if status == "exists":
+        await message.answer(f"Канал {normalize_channel(argument)} уже активен.")
+        return
+    await message.answer(f"Канал {normalize_channel(argument)} добавлен.")
+
+
+@dispatcher.message(Command("remove_channel"))
+async def remove_channel_command(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Команда доступна только владельцу.")
+        return
+    argument = _command_argument(message.text)
+    if not argument:
+        await message.answer("Укажите имя: /remove_channel имя_канала")
+        return
+    status = SeenStore().deactivate_channel(argument)
+    if status == "invalid":
+        await message.answer("Имя канала не прошло проверку.")
+        return
+    if status == "missing":
+        await message.answer("Такого канала в базе нет.")
+        return
+    if status == "inactive":
+        await message.answer("Канал уже отключён.")
+        return
+    await message.answer(f"Канал {normalize_channel(argument)} отключён.")
+
+
+@dispatcher.message(Command("list_channels"))
+async def list_channels_command(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Команда доступна только владельцу.")
+        return
+    text = await asyncio.to_thread(_channel_list_text)
+    await message.answer(text)
+
+
+def _command_argument(text: str | None) -> str:
+    parts = (text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return parts[1].strip()
+
+
+def _channel_list_text() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    rows = SeenStore().list_active_with_recent_counts(since)
+    if not rows:
+        return "Активных каналов нет."
+    lines = ["Активные каналы, находки за 7 дней:"]
+    for name, count in rows:
+        lines.append(f"• {name} — {count}")
+    return "\n".join(lines)
 
 
 @dispatcher.message(Command("stats"))

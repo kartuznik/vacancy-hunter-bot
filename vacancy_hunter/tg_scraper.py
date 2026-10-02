@@ -18,10 +18,14 @@ MAX_ATTEMPTS = 3
 MIN_TEXT_LENGTH = 80
 
 
-def fetch_telegram(channels: list[str] | tuple[str, ...]) -> list[dict]:
+def fetch_telegram(channels: list[str] | tuple[str, ...] | None = None) -> list[dict]:
     vacancies: list[dict] = []
+    if channels is None:
+        from vacancy_hunter.database import SeenStore
+
+        channels = SeenStore().channels_for_search()
     if not channels:
-        logger.warning("TG_CHANNELS пуст, источник Telegram пропущен")
+        logger.warning("Активных Telegram-каналов нет, источник пропущен")
         return vacancies
 
     for channel in channels:

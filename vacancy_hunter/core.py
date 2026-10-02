@@ -70,7 +70,7 @@ def gather() -> tuple[dict[str, list[dict]], list[dict], int]:
 def collect(settings) -> dict[str, list[dict]]:
     return {
         "hh": safe("hh", lambda: fetch_hh(settings.hh_queries)),
-        "telegram": safe("telegram", lambda: fetch_telegram(settings.tg_channels)),
+        "telegram": safe("telegram", fetch_telegram),
         "habr": safe("habr", lambda: fetch_habr(settings.habr_rss)),
     }
 

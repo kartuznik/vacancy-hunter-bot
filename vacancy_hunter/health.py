@@ -33,6 +33,7 @@ def build_health_report(started_at: float) -> str:
         _check_habr(),
         _check_telegram(),
         _check_sqlite(),
+        _check_channels(),
         _check_digest_write(),
         f"✅ Uptime — {format_uptime(started_at)}",
     ]
@@ -95,6 +96,17 @@ def _check_sqlite() -> str:
     except Exception as exc:
         return f"❌ SQLite — {type(exc).__name__}"
     return f"✅ SQLite — {count} записей"
+
+
+def _check_channels() -> str:
+    store = SeenStore()
+    active = len(store.active_channels())
+    if active:
+        return f"✅ Каналы поиска: ✅ {active} активных"
+    fallback = len(store.channels_for_search())
+    if fallback:
+        return f"⚠️ Каналы поиска: 0 активных, запасной список {fallback}"
+    return "❌ Каналы поиска: 0 активных"
 
 
 def _check_digest_write() -> str:
