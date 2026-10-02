@@ -1,56 +1,100 @@
-"""Долгоживущий бот: ручной поиск и отдача файла дайджеста."""
+"""Долгоживущий бот с командным меню и самодиагностикой."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.filters import Command, CommandStart
+from aiogram.types import BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import get_settings
 from vacancy_hunter.core import latest_digest, run_search
+from vacancy_hunter.database import SeenStore, default_db_path
+from vacancy_hunter.health import build_health_report
 
 logger = logging.getLogger(__name__)
 
-FIND_NOW = "find_now"
-DOWNLOAD_LATEST = "download_latest"
 DOWNLOAD_CURRENT = "download_current"
+STARTED_AT = time.monotonic()
+
+COMMANDS = (
+    BotCommand(command="search", description="Запустить поиск вакансий"),
+    BotCommand(command="download", description="Скачать последний дайджест"),
+    BotCommand(command="help", description="Справка по командам"),
+    BotCommand(command="health", description="Самодиагностика системы"),
+    BotCommand(command="stats", description="Статистика поиска"),
+)
+
+HELP_TEXT = (
+    "Команды:\n"
+    "/search — запустить поиск вакансий\n"
+    "/download — скачать последний дайджест\n"
+    "/help — эта справка\n"
+    "/health — самодиагностика системы\n"
+    "/stats — статистика поиска по базе"
+)
 
 dispatcher = Dispatcher()
 last_digest: dict[int, str] = {}
 busy_chats: set[int] = set()
 
 
-def keyboard(include_current: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🔍 Найти сейчас", callback_data=FIND_NOW)],
-        [InlineKeyboardButton(text="📥 Скачать дайджест", callback_data=DOWNLOAD_LATEST)],
-    ]
-    if include_current:
-        rows.append(
+def current_digest_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="📥 Скачать этот дайджест", callback_data=DOWNLOAD_CURRENT)]
-        )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        ]
+    )
 
 
 @dispatcher.message(CommandStart())
 async def start(message: Message) -> None:
-    await message.answer(
-        "Vacancy hunter. Поиск можно запустить кнопкой или дождаться фонового прогона.",
-        reply_markup=keyboard(message.chat.id in last_digest),
-    )
+    await message.answer("Vacancy hunter. Список команд: /help")
 
 
-@dispatcher.callback_query(F.data == DOWNLOAD_LATEST)
-async def download_latest(query: CallbackQuery) -> None:
-    path = latest_digest()
-    if path is None or query.message is None:
-        await query.answer("Файлов дайджеста пока нет", show_alert=True)
+@dispatcher.message(Command("help"))
+async def help_command(message: Message) -> None:
+    await message.answer(HELP_TEXT)
+
+
+@dispatcher.message(Command("download"))
+async def download_command(message: Message) -> None:
+    path = await asyncio.to_thread(latest_digest)
+    if path is None:
+        await message.answer("Файлов дайджеста пока нет.")
         return
-    await query.answer()
-    await query.message.answer_document(FSInputFile(path))
+    await message.answer_document(FSInputFile(path))
+
+
+@dispatcher.message(Command("search"))
+async def search_command(message: Message) -> None:
+    chat_id = message.chat.id
+    if chat_id in busy_chats:
+        await message.answer("Поиск уже идёт.")
+        return
+    busy_chats.add(chat_id)
+    await message.answer("Ищу вакансии.")
+    try:
+        result = await asyncio.to_thread(run_search, False)
+    except Exception:
+        logger.exception("Ручной поиск не выполнен")
+        await message.answer("Поиск завершился с ошибкой. Подробности в журнале сервиса.")
+        return
+    finally:
+        busy_chats.discard(chat_id)
+    last_digest[chat_id] = str(result.digest_path)
+    if result.selected and result.blocks:
+        for chunk in result.blocks[:-1]:
+            await message.answer(chunk, parse_mode="HTML")
+        await message.answer(result.blocks[-1], parse_mode="HTML", reply_markup=current_digest_keyboard())
+        return
+    await message.answer(
+        "Новых вакансий нет. Файл дайджеста обновлён.",
+        reply_markup=current_digest_keyboard(),
+    )
 
 
 @dispatcher.callback_query(F.data == DOWNLOAD_CURRENT)
@@ -60,38 +104,37 @@ async def download_current(query: CallbackQuery) -> None:
         return
     stored = last_digest.get(query.message.chat.id)
     if not stored:
-        await query.answer("Сначала запустите поиск", show_alert=True)
+        await query.answer("Сначала запустите /search", show_alert=True)
         return
     await query.answer()
     await query.message.answer_document(FSInputFile(stored))
 
 
-@dispatcher.callback_query(F.data == FIND_NOW)
-async def find_now(query: CallbackQuery) -> None:
-    if query.message is None:
-        await query.answer()
-        return
-    chat_id = query.message.chat.id
-    if chat_id in busy_chats:
-        await query.answer("Поиск уже идёт", show_alert=True)
-        return
-    busy_chats.add(chat_id)
-    await query.answer("Ищу вакансии")
-    try:
-        result = await asyncio.to_thread(run_search, False)
-    except Exception:
-        logger.exception("Ручной поиск не выполнен")
-        await query.message.answer("Поиск завершился с ошибкой. Подробности в журнале сервиса.")
-        return
-    finally:
-        busy_chats.discard(chat_id)
-    last_digest[chat_id] = str(result.digest_path)
-    if result.selected:
-        for chunk in result.blocks:
-            await query.message.answer(chunk, parse_mode="HTML")
-    else:
-        await query.message.answer("Новых вакансий нет. Файл дайджеста обновлён.")
-    await query.message.edit_reply_markup(reply_markup=keyboard(True))
+@dispatcher.message(Command("stats"))
+async def stats_command(message: Message) -> None:
+    text = await asyncio.to_thread(_stats_text)
+    await message.answer(text)
+
+
+@dispatcher.message(Command("health"))
+async def health_command(message: Message) -> None:
+    await message.answer("Проверяю источники, базу и диск.")
+    report = await asyncio.to_thread(build_health_report, STARTED_AT)
+    await message.answer(report)
+
+
+def _stats_text() -> str:
+    path = default_db_path()
+    if not path.is_file():
+        return "В базе пока нет вакансий."
+    rows = SeenStore(path).stats_by_source()
+    if not rows:
+        return "В базе пока нет вакансий."
+    lines = ["Статистика поиска"]
+    for source, count, seen_at in rows:
+        stamp = seen_at or "нет даты"
+        lines.append(f"{source}: {count}, последнее обновление {stamp}")
+    return "\n".join(lines)
 
 
 async def _run() -> None:
@@ -100,6 +143,7 @@ async def _run() -> None:
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN пуст")
     bot = Bot(settings.telegram_bot_token)
+    await bot.set_my_commands(list(COMMANDS))
     await dispatcher.start_polling(bot)
 
 

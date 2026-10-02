@@ -47,6 +47,23 @@ class SeenStore:
             )
             return cursor.rowcount == 1
 
+    def count_vacancies(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM seen_vacancies").fetchone()
+        return int(row[0])
+
+    def stats_by_source(self) -> list[tuple[str, int, str | None]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source, COUNT(*), MAX(seen_at)
+                FROM seen_vacancies
+                GROUP BY source
+                ORDER BY source
+                """
+            ).fetchall()
+        return [(str(row[0]), int(row[1]), row[2]) for row in rows]
+
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
