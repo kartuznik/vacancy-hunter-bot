@@ -11,9 +11,9 @@
 3. `habr_parser.py` скачивает RSS и разбирает его библиотекой `feedparser`.
 4. `filter_and_score.py` смотрит название, описание и зарплату. Любое слово из `blacklist_hard` (границы слов, без учёта регистра) сразу отсекает вакансию: туда входят город, офис, гибрид и уровни senior / сеньор / lead / team lead / head / руководитель / главный / principal. Дальше нужны все три условия сразу: маркер вакансии, ядро `python` / `питон` / `пайтон` и хотя бы одна технология из whitelist. Иначе начисляются баллы: `+30` за каждое уникальное слово whitelist, `+20` за junior / intern / «без опыта» / стажёра, `+15` за явную удалёнку, `+10` если публикация моложе 24 часов, `−15` за каждое уникальное совпадение `blacklist_soft` (`middle+`, стаж 3+ года или 5 лет, английский B2, English fluent). Ядро Python в эти `+30` не входит.
 5. `database.py` хранит уже показанные вакансии в SQLite. Ключ — SHA-256 от строки `источник + url`. Файл базы считается как `Path(__file__).resolve().parent.parent / "data" / "seen_vacancies.db"`. Каталог `data/` создаётся при первом запуске.
-6. `hunter.py` собирает три источника, фильтрует и записывает только новые строки. Дайджест `digests/digest_YYYY-MM-DD.md` и сообщение в Telegram строит один форматтер: разделы 🟢 HH.ru, 🔵 Habr Career и 🟣 Telegram (каналы внутри Telegram идут отдельно). Перед вакансией стоит 🔥 HIGH (скор выше 100), ⚡ MEDIUM (50–100) или 📄 LOW (ниже 50), затем строка совпадений whitelist. В файле у карточки остаётся 500 символов описания, в Telegram карточка короткая. В конце обоих каналов — сводка прогона и топ-3 по скору. Локальная таблица `rich` показывает уровень, источник, канал и совпадения.
-
-С `--all` в дайджест и Telegram попадают все новые вакансии, а не десять лучших. С `--stats` скрипт только печатает сводку и таблицу: база, файл дайджеста и Telegram не трогаются.
+6. `vacancy_hunter/core.py` собирает три источника, фильтрует и записывает только новые строки. Дайджест `digests/digest_YYYY-MM-DD.md` и текст для Telegram строит один форматтер: разделы 🟢 HH.ru, 🔵 Habr Career и 🟣 Telegram (каналы внутри Telegram идут отдельно). Перед вакансией стоит 🔥 HIGH (скор выше 100), ⚡ MEDIUM (50–100) или 📄 LOW (ниже 50), затем строка совпадений whitelist. В файле у карточки остаётся 500 символов описания, в Telegram карточка короткая. В конце обоих каналов — сводка прогона и топ-3 по скору.
+7. `hunter.py` — CLI для ручного прогона и отладки. Без флагов вызывает `run_search` и отправляет текст в Telegram. `--no-notify` пишет только файл и базу. `--stats` печатает таблицу `rich` и ничего не сохраняет. `--all` берёт все новые вакансии, а не десять лучших.
+8. `bot.py` — долгоживущий aiogram-бот. `/start` показывает кнопки «🔍 Найти сейчас» и «📥 Скачать дайджест». Поиск идёт в отдельном потоке и после ответа добавляет «📥 Скачать этот дайджест».
 
 ## Настройка .env
 
@@ -42,22 +42,26 @@ cp .env.example .env
 
 ## systemd
 
-Юниты лежат в корне репозитория: `vacancy-hunter.service` и `vacancy-hunter.timer`. Таймер запускает одноразовый сервис каждые 4 часа (`OnCalendar=*-*-* 00/4:00:00`). `Persistent=true` догоняет пропущенный запуск после простоя. Сервис стартует интерпретатором из `.venv` и сам читает `.env` из корня репозитория.
+В корне репозитория три юнита. `vacancy-hunter.service` — долгоживущий бот (`Type=simple`, `bot.py`). `vacancy-hunter-run.service` — разовый прогон `hunter.py --no-notify`: только файл и база, без сообщения в чат. `vacancy-hunter.timer` запускает этот oneshot каждые 4 часа (`OnCalendar=*-*-* 00/4:00:00`). `Persistent=true` догоняет пропущенный запуск после простоя. Оба процесса читают `.env` из корня репозитория.
 
 Установка:
 
 ```bash
-sudo cp vacancy-hunter.service vacancy-hunter.timer /etc/systemd/system/
+sudo cp vacancy-hunter.service vacancy-hunter-run.service vacancy-hunter.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable vacancy-hunter.timer
-sudo systemctl start vacancy-hunter.timer
+sudo systemctl enable --now vacancy-hunter.service
+sudo systemctl enable --now vacancy-hunter.timer
 ```
 
 Управление:
 
 ```bash
+systemctl status vacancy-hunter.service --no-pager
 systemctl status vacancy-hunter.timer --no-pager
+systemctl start vacancy-hunter.service
+systemctl stop vacancy-hunter.service
 systemctl start vacancy-hunter.timer
 systemctl stop vacancy-hunter.timer
 journalctl -u vacancy-hunter.service -n 15 --no-pager
+journalctl -u vacancy-hunter-run.service -n 15 --no-pager
 ```
