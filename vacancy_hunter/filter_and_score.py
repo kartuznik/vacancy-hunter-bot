@@ -16,7 +16,7 @@ SOFT_PENALTY = 15
 FRESH_WINDOW = timedelta(hours=24)
 
 _JUNIOR = re.compile(
-    r"(?<![\w])(?:junior|стажер\w{0,6}|без\s+опыта)(?![\w])",
+    r"(?<![\w])(?:junior|intern|стажер\w{0,6}|без\s+опыта)(?![\w])",
     re.IGNORECASE,
 )
 _REMOTE = re.compile(
@@ -58,7 +58,7 @@ def score_text(
     remote = _REMOTE.search(normalized) is not None
     fresh = _is_fresh(published_at, now)
 
-    score = WHITELIST_BONUS
+    score = WHITELIST_BONUS * len(whitelist_hits)
     if junior:
         score += JUNIOR_BONUS
     if remote:

@@ -25,10 +25,6 @@ WHITELIST: tuple[str, ...] = (
     "langchain",
     "langgraph",
     "chromadb",
-    "telegram bot",
-    "бот",
-    "backend",
-    "бэкенд",
 )
 
 BLACKLIST_HARD: tuple[str, ...] = (
@@ -66,17 +62,18 @@ BLACKLIST_HARD: tuple[str, ...] = (
     "devops",
     "qa",
     "тестиров",
+    "москва",
+    "санкт-петербург",
+    "офис",
+    "гибрид",
 )
 
 BLACKLIST_SOFT: tuple[str, ...] = (
     "senior",
-    "сеньор",
     "middle+",
     "team lead",
     "3+ года",
     "5 лет",
-    "офис",
-    "гибрид",
     "английский b2",
     "english fluent",
 )

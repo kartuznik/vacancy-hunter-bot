@@ -64,15 +64,15 @@ def test_full_score_for_junior_remote_fresh():
     assert result.junior is True
     assert result.remote is True
     assert result.fresh is True
-    assert result.score == 30 + 20 + 15 + 10
-    assert result.whitelist_hits.count("python") == 1
+    assert result.whitelist_hits == ("python", "django")
+    assert result.score == 30 * 2 + 20 + 15 + 10
 
 
-def test_whitelist_bonus_is_not_per_keyword():
+def test_whitelist_bonus_is_per_keyword():
     result = score_text("Python django fastapi backend", now=NOW)
     assert result is not None
-    assert len(result.whitelist_hits) >= 3
-    assert result.score == 30
+    assert result.whitelist_hits == ("python", "fastapi", "django")
+    assert result.score == 30 * 3
 
 
 def test_each_unique_soft_hit_costs_15():
@@ -89,11 +89,30 @@ def test_soft_hit_is_unique_and_middle_plus_matches():
     assert result.score == 15
 
 
-def test_yo_normalization_matches_remote_and_layout():
-    result = score_text("Python бэкенд, удалёнка", now=NOW)
+def test_yo_normalization_matches_remote():
+    result = score_text("Python удалёнка", now=NOW)
     assert result is not None
     assert result.remote is True
-    assert "бэкенд" in result.whitelist_hits
+    assert result.whitelist_hits == ("python",)
+    assert result.score == 30 + 15
+
+
+def test_generic_titles_and_moscow_are_rejected():
+    assert score_text(".NET разработчик", now=NOW) is None
+    assert score_text("Golang", now=NOW) is None
+    assert score_text("Python разработчик, Москва", now=NOW) is None
+
+
+def test_python_junior_remote_fresh_gets_full_score():
+    published = NOW - timedelta(hours=1)
+    result = score_text("python junior удаленно", published_at=published, now=NOW)
+    assert result is not None
+    assert result.whitelist_hits == ("python",)
+    assert result.junior is True
+    assert result.remote is True
+    assert result.fresh is True
+    assert result.soft_hits == ()
+    assert result.score == 30 + 20 + 15 + 10
 
 
 def test_stale_vacancy_has_no_fresh_bonus():
