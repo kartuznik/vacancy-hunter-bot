@@ -8,7 +8,16 @@ import time
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeDefault,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import get_settings
 from vacancy_hunter.core import latest_digest, run_search
@@ -27,8 +36,8 @@ COMMANDS = (
     BotCommand(command="health", description="Самодиагностика системы"),
     BotCommand(command="stats", description="Статистика поиска"),
     BotCommand(command="add_channel", description="Добавить канал поиска"),
-    BotCommand(command="remove_channel", description="Отключить канал поиска"),
-    BotCommand(command="list_channels", description="Список активных каналов"),
+    BotCommand(command="remove_channel", description="Удалить канал из поиска"),
+    BotCommand(command="list_channels", description="Показать список каналов"),
 )
 
 HELP_TEXT = (
@@ -38,9 +47,9 @@ HELP_TEXT = (
     "/help — эта справка\n"
     "/health — самодиагностика системы\n"
     "/stats — статистика поиска по базе\n"
-    "/add_channel имя — добавить канал\n"
-    "/remove_channel имя — отключить канал\n"
-    "/list_channels — активные каналы и находки за 7 дней"
+    "/add_channel имя [имя ...] — добавить один или несколько каналов через пробел\n"
+    "/remove_channel имя — удалить канал из поиска\n"
+    "/list_channels — показать список каналов и находки за 7 дней"
 )
 
 dispatcher = Dispatcher()
@@ -128,19 +137,10 @@ async def add_channel_command(message: Message) -> None:
         return
     argument = _command_argument(message.text)
     if not argument:
-        await message.answer("Укажите имя: /add_channel имя_канала")
+        await message.answer("Укажите имена: /add_channel канал1 канал2")
         return
-    status = SeenStore().add_channel(argument)
-    if status == "invalid":
-        await message.answer("Имя канала не прошло проверку. Нужна латиница, можно _, длина 5–32.")
-        return
-    if status == "reactivated":
-        await message.answer(f"Канал {normalize_channel(argument)} снова активен.")
-        return
-    if status == "exists":
-        await message.answer(f"Канал {normalize_channel(argument)} уже активен.")
-        return
-    await message.answer(f"Канал {normalize_channel(argument)} добавлен.")
+    text = await asyncio.to_thread(format_add_channels_report, argument.split())
+    await message.answer(text)
 
 
 @dispatcher.message(Command("remove_channel"))
@@ -172,6 +172,31 @@ async def list_channels_command(message: Message) -> None:
         return
     text = await asyncio.to_thread(_channel_list_text)
     await message.answer(text)
+
+
+def format_add_channels_report(raw_tokens: list[str], store: SeenStore | None = None) -> str:
+    store = store or SeenStore()
+    added = 0
+    skipped = 0
+    invalid = 0
+    lines: list[str] = []
+    for raw in raw_tokens:
+        status = store.add_channel(raw)
+        name = normalize_channel(raw)
+        if status == "added":
+            added += 1
+            lines.append(f"{name} — добавлен")
+        elif status == "reactivated":
+            added += 1
+            lines.append(f"{name} — снова активен")
+        elif status == "exists":
+            skipped += 1
+            lines.append(f"{name} — пропущен: уже активен")
+        else:
+            invalid += 1
+            lines.append(f"{raw.strip()} — невалидно")
+    lines.append(f"Добавлено: {added}. Пропущено: {skipped}. Невалидно: {invalid}.")
+    return "\n".join(lines)
 
 
 def _command_argument(text: str | None) -> str:
@@ -227,7 +252,9 @@ async def _run() -> None:
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN пуст")
     bot = Bot(settings.telegram_bot_token)
-    await bot.set_my_commands(list(COMMANDS))
+    commands = list(COMMANDS)
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
     await dispatcher.start_polling(bot)
 
 

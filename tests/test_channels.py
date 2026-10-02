@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from bot import format_add_channels_report
 from vacancy_hunter.database import SeenStore
 
 
@@ -22,6 +23,24 @@ def test_add_channel_strips_prefix_and_rejects_bad_names(tmp_path):
     assert store.add_channel("bad name") == "invalid"
     assert store.add_channel("ab") == "invalid"
     assert store.active_channels() == ["job_python"]
+
+
+def test_bulk_add_report_splits_added_skipped_invalid(tmp_path):
+    store = _store(tmp_path)
+    store.add_channel("geekjobs")
+    store.add_channel("forpython")
+    store.deactivate_channel("forpython")
+    text = format_add_channels_report(
+        ["@job_python", "https://t.me/s/geekjobs", "t.me/forpython", "bad", "ab"],
+        store,
+    )
+    assert "job_python — добавлен" in text
+    assert "geekjobs — пропущен: уже активен" in text
+    assert "forpython — снова активен" in text
+    assert "bad — невалидно" in text
+    assert "ab — невалидно" in text
+    assert "Добавлено: 2. Пропущено: 1. Невалидно: 2." in text
+    assert store.active_channels() == ["forpython", "geekjobs", "job_python"]
 
 
 def test_remove_deactivates_and_add_reactivates(tmp_path):
