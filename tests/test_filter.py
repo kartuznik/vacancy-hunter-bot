@@ -40,8 +40,9 @@ def test_missing_whitelist_rejects():
 
 
 def test_word_boundary_does_not_match_react_inside_reaction():
-    result = score_text("Python developer studies reaction times", now=NOW)
+    result = score_text("Python developer studies reaction times, fastapi", now=NOW)
     assert result is not None
+    assert result.whitelist_hits == ("fastapi",)
     assert "react" not in result.soft_hits
 
 
@@ -57,7 +58,7 @@ def test_testing_stem_is_rejected():
 def test_full_score_for_junior_remote_fresh():
     published = NOW - timedelta(hours=2)
     result = score_text(
-        "Junior Python backend, удаленно, django",
+        "Junior Python developer, удаленно, django",
         published_at=published,
         now=NOW,
     )
@@ -65,36 +66,34 @@ def test_full_score_for_junior_remote_fresh():
     assert result.junior is True
     assert result.remote is True
     assert result.fresh is True
-    assert result.whitelist_hits == ("python", "django")
-    assert result.score == 30 * 2 + 20 + 15 + 10
+    assert result.whitelist_hits == ("django",)
+    assert result.score == 30 + 20 + 15 + 10
 
 
 def test_whitelist_bonus_is_per_keyword():
-    result = score_text("Python django fastapi backend", now=NOW)
+    result = score_text("Python developer django fastapi", now=NOW)
     assert result is not None
-    assert result.whitelist_hits == ("python", "fastapi", "django")
-    assert result.score == 30 * 3
+    assert result.whitelist_hits == ("fastapi", "django")
+    assert result.score == 30 * 2
 
 
-def test_each_unique_soft_hit_costs_15():
-    result = score_text("Python senior team lead backend", now=NOW)
-    assert result is not None
-    assert result.soft_hits == ("senior", "team lead")
-    assert result.score == 30 - 15 - 15
+def test_senior_and_team_lead_are_hard_rejects():
+    assert score_text("Python developer senior fastapi", now=NOW) is None
+    assert score_text("Python developer team lead fastapi", now=NOW) is None
 
 
 def test_soft_hit_is_unique_and_middle_plus_matches():
-    result = score_text("Python middle+ middle+ backend", now=NOW)
+    result = score_text("Python developer middle+ middle+ fastapi", now=NOW)
     assert result is not None
     assert result.soft_hits == ("middle+",)
     assert result.score == 15
 
 
 def test_yo_normalization_matches_remote():
-    result = score_text("Python удалёнка", now=NOW)
+    result = score_text("Python developer удалёнка fastapi", now=NOW)
     assert result is not None
     assert result.remote is True
-    assert result.whitelist_hits == ("python",)
+    assert result.whitelist_hits == ("fastapi",)
     assert result.score == 30 + 15
 
 
@@ -106,9 +105,13 @@ def test_generic_titles_and_moscow_are_rejected():
 
 def test_python_junior_remote_fresh_gets_full_score():
     published = NOW - timedelta(hours=1)
-    result = score_text("python junior удаленно", published_at=published, now=NOW)
+    result = score_text(
+        "python junior developer удаленно fastapi",
+        published_at=published,
+        now=NOW,
+    )
     assert result is not None
-    assert result.whitelist_hits == ("python",)
+    assert result.whitelist_hits == ("fastapi",)
     assert result.junior is True
     assert result.remote is True
     assert result.fresh is True
@@ -118,9 +121,24 @@ def test_python_junior_remote_fresh_gets_full_score():
 
 def test_stale_vacancy_has_no_fresh_bonus():
     published = NOW - timedelta(hours=30)
-    result = score_text("Python backend junior", published_at=published, now=NOW)
+    result = score_text("Python junior developer fastapi", published_at=published, now=NOW)
     assert result is not None
     assert result.fresh is False
+    assert result.score == 50
+
+
+def test_news_non_python_and_senior_are_rejected():
+    assert score_text("Россияне заработали 5 млрд", now=NOW) is None
+    assert score_text("postgresql DBA", now=NOW) is None
+    assert score_text("Senior Python Developer", now=NOW) is None
+
+
+def test_junior_python_fastapi_scores_50():
+    result = score_text("Junior Python Developer с fastapi", now=NOW)
+    assert result is not None
+    assert result.junior is True
+    assert result.whitelist_hits == ("fastapi",)
+    assert result.soft_hits == ()
     assert result.score == 50
 
 

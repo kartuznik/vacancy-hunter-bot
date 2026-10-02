@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from config import BLACKLIST_HARD, BLACKLIST_SOFT, WHITELIST
+from config import BLACKLIST_HARD, BLACKLIST_SOFT, CORE_PYTHON, VACANCY_MARKERS, WHITELIST
 
 WHITELIST_BONUS = 30
 JUNIOR_BONUS = 20
@@ -48,6 +48,11 @@ def score_text(
     for term in BLACKLIST_HARD:
         if _pattern(term).search(normalized):
             return None
+
+    if not any(_pattern(term).search(normalized) for term in VACANCY_MARKERS):
+        return None
+    if not any(_pattern(term).search(normalized) for term in CORE_PYTHON):
+        return None
 
     whitelist_hits = tuple(term for term in WHITELIST if _pattern(term).search(normalized))
     if not whitelist_hits:

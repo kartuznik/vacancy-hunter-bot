@@ -11,8 +11,32 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
-WHITELIST: tuple[str, ...] = (
+VACANCY_MARKERS: tuple[str, ...] = (
+    "вакансия",
+    "ищем",
+    "требуется",
+    "job",
+    "hiring",
+    "открыта позиция",
+    "резюме",
+    "сотрудник",
+    "специалист",
+    "работа",
+    "position",
+    "open",
+    "разработчик",
+    "инженер",
+    "developer",
+    "engineer",
+)
+
+CORE_PYTHON: tuple[str, ...] = (
     "python",
+    "питон",
+    "пайтон",
+)
+
+WHITELIST: tuple[str, ...] = (
     "aiogram",
     "fastapi",
     "django",
@@ -66,12 +90,18 @@ BLACKLIST_HARD: tuple[str, ...] = (
     "санкт-петербург",
     "офис",
     "гибрид",
+    "senior",
+    "сеньор",
+    "lead",
+    "team lead",
+    "head",
+    "руководитель",
+    "главный",
+    "principal",
 )
 
 BLACKLIST_SOFT: tuple[str, ...] = (
-    "senior",
     "middle+",
-    "team lead",
     "3+ года",
     "5 лет",
     "английский b2",
