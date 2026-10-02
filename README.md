@@ -17,21 +17,13 @@
 
 ## Настройка .env
 
+Единственный источник истины для конфигурации — файл `.env.example`. Файл `.env` владелец копирует и заполняет секретами самостоятельно.
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
-
-Секции в `.env`:
-
-| Переменная | Смысл |
-| --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Токен бота от @BotFather |
-| `CHAT_ID` | Числовой id чата, куда слать карточки |
-| `HH_QUERIES` | Фразы для HH через запятую |
-| `TG_CHANNELS` | Имена каналов через запятую, без `https://t.me/` |
-| `HABR_RSS` | Адрес ленты. Рабочий URL: `https://career.habr.com/vacancies/rss?remote=true&q=python` |
 
 Файл `.env`, каталоги `data/` и `digests/` перечислены в `.gitignore`.
 
