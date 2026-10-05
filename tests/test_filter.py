@@ -133,6 +133,15 @@ def test_news_non_python_and_senior_are_rejected():
     assert score_text("Senior Python Developer", now=NOW) is None
 
 
+def test_python_core_without_whitelist_scores_low():
+    result = score_text("python-backend developer", now=NOW)
+    assert result is not None
+    assert result.whitelist_hits == ()
+    assert result.score == 10
+    assert score_text("Java разработчик", now=NOW) is None
+    assert score_text("Компания увеличила выручку за квартал", now=NOW) is None
+
+
 def test_junior_python_fastapi_scores_50():
     result = score_text("Junior Python Developer с fastapi", now=NOW)
     assert result is not None

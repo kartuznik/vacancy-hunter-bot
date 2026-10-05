@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from config import BLACKLIST_HARD, BLACKLIST_SOFT, CORE_PYTHON, VACANCY_MARKERS, WHITELIST
 
 WHITELIST_BONUS = 30
+CORE_ONLY_BONUS = 10
 JUNIOR_BONUS = 20
 REMOTE_BONUS = 15
 FRESH_BONUS = 10
@@ -55,15 +56,16 @@ def score_text(
         return None
 
     whitelist_hits = tuple(term for term in WHITELIST if _pattern(term).search(normalized))
-    if not whitelist_hits:
-        return None
 
     soft_hits = tuple(term for term in BLACKLIST_SOFT if _pattern(term).search(normalized))
     junior = _JUNIOR.search(normalized) is not None
     remote = _REMOTE.search(normalized) is not None
     fresh = _is_fresh(published_at, now)
 
-    score = WHITELIST_BONUS * len(whitelist_hits)
+    if whitelist_hits:
+        score = WHITELIST_BONUS * len(whitelist_hits)
+    else:
+        score = CORE_ONLY_BONUS
     if junior:
         score += JUNIOR_BONUS
     if remote:
