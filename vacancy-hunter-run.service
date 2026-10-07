@@ -6,4 +6,4 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/bots/vacancy-hunter
-ExecStart=/opt/bots/vacancy-hunter/.venv/bin/python /opt/bots/vacancy-hunter/hunter.py --no-notify
+ExecStart=/opt/bots/vacancy-hunter/.venv/bin/python /opt/bots/vacancy-hunter/hunter.py

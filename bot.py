@@ -7,6 +7,7 @@ import logging
 import time
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -20,7 +21,7 @@ from aiogram.types import (
 )
 
 from config import get_settings
-from vacancy_hunter.core import latest_digest, run_search
+from vacancy_hunter.core import SEND_PAUSE_SECONDS, chunk_messages, latest_digest, run_search
 from vacancy_hunter.database import SeenStore, default_db_path, normalize_channel
 from vacancy_hunter.health import build_health_report
 
@@ -102,14 +103,26 @@ async def search_command(message: Message) -> None:
         busy_chats.discard(chat_id)
     last_digest[chat_id] = str(result.digest_path)
     if result.selected and result.blocks:
-        for chunk in result.blocks[:-1]:
-            await message.answer(chunk, parse_mode="HTML")
-        await message.answer(result.blocks[-1], parse_mode="HTML", reply_markup=current_digest_keyboard())
+        chunks = chunk_messages(result.blocks)
+        for index, chunk in enumerate(chunks):
+            if index:
+                await asyncio.sleep(SEND_PAUSE_SECONDS)
+            markup = current_digest_keyboard() if index == len(chunks) - 1 else None
+            await answer_with_retry(message, chunk, parse_mode="HTML", reply_markup=markup)
         return
     await message.answer(
         "Новых вакансий нет. Файл дайджеста обновлён.",
         reply_markup=current_digest_keyboard(),
     )
+
+
+async def answer_with_retry(message: Message, text: str, **kwargs) -> None:
+    try:
+        await message.answer(text, **kwargs)
+    except TelegramRetryAfter as exc:
+        logger.warning("Telegram ответил 429, повтор через %s с", exc.retry_after)
+        await asyncio.sleep(exc.retry_after)
+        await message.answer(text, **kwargs)
 
 
 @dispatcher.callback_query(F.data == DOWNLOAD_CURRENT)

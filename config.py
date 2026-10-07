@@ -86,18 +86,33 @@ BLACKLIST_HARD: tuple[str, ...] = (
     "devops",
     "qa",
     "тестиров",
+)
+
+BLACKLIST_LOCATION: tuple[str, ...] = (
     "москва",
     "санкт-петербург",
     "офис",
     "гибрид",
+)
+
+BLACKLIST_SENIORITY: tuple[str, ...] = (
     "senior",
     "сеньор",
     "lead",
     "team lead",
     "head",
+    "лидер",
     "руководитель",
     "главный",
     "principal",
+)
+
+ROLE_MARKERS: tuple[str, ...] = (
+    "разработчик",
+    "developer",
+    "engineer",
+    "инженер",
+    "программист",
 )
 
 BLACKLIST_SOFT: tuple[str, ...] = (

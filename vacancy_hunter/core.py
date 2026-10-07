@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 TOP_N = 10
 TELEGRAM_LIMIT = 3500
+SEND_PAUSE_SECONDS = 1.0
 
 
 class SearchResult(NamedTuple):
@@ -121,11 +123,17 @@ def apply_filter(collected: dict[str, list[dict]]) -> tuple[list[dict], int]:
     return passed, rejected
 
 
-def write_digest(items: list[dict], stats) -> Path:
+def write_digest(items: list[dict], stats, *, now: datetime | None = None) -> Path:
     directory = digests_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"digest_{date.today().isoformat()}.md"
-    path.write_text(render_markdown(items, stats, day=date.today().isoformat()), encoding="utf-8")
+    moment = now or datetime.now()
+    stem = f"digest_{moment:%Y-%m-%d_%H%M}"
+    path = directory / f"{stem}.md"
+    suffix = 2
+    while path.exists():
+        path = directory / f"{stem}_{suffix}.md"
+        suffix += 1
+    path.write_text(render_markdown(items, stats, day=moment.date().isoformat()), encoding="utf-8")
     return path
 
 
@@ -137,24 +145,42 @@ def send_telegram(token: str, chat_id: str, items: list[dict], blocks: list[str]
         logger.warning("TELEGRAM_BOT_TOKEN или CHAT_ID пуст, отправка пропущена")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for chunk in chunk_messages(blocks):
+    payload = {"chat_id": chat_id, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    for index, chunk in enumerate(chunk_messages(blocks)):
+        if index:
+            time.sleep(SEND_PAUSE_SECONDS)
+        if not _post_chunk(url, {**payload, "text": chunk}):
+            return
+
+
+def _post_chunk(url: str, data: dict) -> bool:
+    for attempt in range(2):
         try:
-            response = requests.post(
-                url,
-                data={
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": "true",
-                },
-                timeout=10,
-            )
+            response = requests.post(url, data=data, timeout=10)
         except requests.RequestException as exc:
-            logger.warning("Telegram не принял сообщение: %s", exc)
-            return
-        if not response.ok:
-            logger.warning("Telegram ответил статусом %s", response.status_code)
-            return
+            logger.warning("Telegram не принял сообщение: %s", type(exc).__name__)
+            return False
+        if response.ok:
+            return True
+        if response.status_code == 429 and attempt == 0:
+            delay = _retry_after(response)
+            logger.warning("Telegram ответил 429, повтор через %s с", delay)
+            time.sleep(delay)
+            continue
+        logger.warning("Telegram ответил статусом %s", response.status_code)
+        return False
+    return False
+
+
+def _retry_after(response) -> int:
+    try:
+        value = response.json().get("parameters", {}).get("retry_after")
+    except ValueError:
+        value = None
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 5
 
 
 def chunk_messages(blocks: list[str]) -> list[str]:

@@ -6,7 +6,16 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from config import BLACKLIST_HARD, BLACKLIST_SOFT, CORE_PYTHON, VACANCY_MARKERS, WHITELIST
+from config import (
+    BLACKLIST_HARD,
+    BLACKLIST_LOCATION,
+    BLACKLIST_SENIORITY,
+    BLACKLIST_SOFT,
+    CORE_PYTHON,
+    ROLE_MARKERS,
+    VACANCY_MARKERS,
+    WHITELIST,
+)
 
 WHITELIST_BONUS = 30
 CORE_ONLY_BONUS = 10
@@ -15,13 +24,14 @@ REMOTE_BONUS = 15
 FRESH_BONUS = 10
 SOFT_PENALTY = 15
 FRESH_WINDOW = timedelta(hours=24)
+HEAD_CHARS = 300
 
 _JUNIOR = re.compile(
     r"(?<![\w])(?:junior|intern|стажер\w{0,6}|без\s+опыта)(?![\w])",
     re.IGNORECASE,
 )
 _REMOTE = re.compile(
-    r"(?<![\w])(?:remote|удален(?:но|ка|ке|ку|ки|ная|ную|ной|ное)?)(?![\w])",
+    r"(?<![\w])(?:remote|удален(?:но|ка|ке|ку|ки|ная|ную|ной|ное|ный|ные)?|дистанционн\w*)(?![\w])",
     re.IGNORECASE,
 )
 
@@ -46,20 +56,27 @@ def score_text(
     if not normalized.strip():
         return None
 
-    for term in BLACKLIST_HARD:
-        if _pattern(term).search(normalized):
-            return None
+    head = _head(normalized)
+    remote = _REMOTE.search(normalized) is not None
 
-    if not any(_pattern(term).search(normalized) for term in VACANCY_MARKERS):
+    if _has_any(normalized, BLACKLIST_SENIORITY):
         return None
-    if not any(_pattern(term).search(normalized) for term in CORE_PYTHON):
+    if _has_any(head, BLACKLIST_HARD):
+        return None
+    if not remote and _has_any(normalized, BLACKLIST_LOCATION):
+        return None
+
+    if not _has_any(normalized, VACANCY_MARKERS):
+        return None
+    if not _has_any(normalized, CORE_PYTHON):
         return None
 
     whitelist_hits = tuple(term for term in WHITELIST if _pattern(term).search(normalized))
+    if not whitelist_hits and not _has_any(head, ROLE_MARKERS):
+        return None
 
     soft_hits = tuple(term for term in BLACKLIST_SOFT if _pattern(term).search(normalized))
     junior = _JUNIOR.search(normalized) is not None
-    remote = _REMOTE.search(normalized) is not None
     fresh = _is_fresh(published_at, now)
 
     if whitelist_hits:
@@ -82,6 +99,15 @@ def score_text(
         remote=remote,
         fresh=fresh,
     )
+
+
+def _head(normalized: str) -> str:
+    title, _, description = normalized.partition("\n")
+    return f"{title}\n{description[:HEAD_CHARS]}"
+
+
+def _has_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(_pattern(term).search(text) for term in terms)
 
 
 def _normalize(text: str) -> str:

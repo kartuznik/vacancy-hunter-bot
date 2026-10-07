@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import requests
 
+from vacancy_hunter.core import send_telegram, write_digest
 from vacancy_hunter.database import SeenStore, default_db_path
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.hh_parser import fetch_hh
@@ -149,6 +150,152 @@ def test_junior_python_fastapi_scores_50():
     assert result.whitelist_hits == ("fastapi",)
     assert result.soft_hits == ()
     assert result.score == 50
+
+
+HABR_ITK_MOSCOW = (
+    "Требуется «Python Developer» (Москва, от 75 000 ₽)\n"
+    "Компания «ITK academy» ищет хорошего специалиста на вакансию «Python Developer». "
+    "Москва (Россия), Санкт-Петербург (Россия), Казань (Россия). От 75 000 ₽. "
+    "Полный рабочий день. Можно удалённо. Требуемые навыки: #junior, #Git, #SQL, "
+    "#Python, #ООП, #Docker, #Django, #FastAPI, #PostgreSQL."
+)
+
+WILDBERRIES_REMOTE = (
+    "Wildberries & Russ\n"
+    "#middle\n#удаленка\n#гибрид\n#офис\nWildberries & Russ\n"
+    "Python-разработчик (Направление клиентского сервиса)\nОпыт работы: от 3 лет\n"
+    "Формат работы: гибрид, удалённо или офис (Москва)\n☑️\nЧем предстоит заниматься\n"
+    "-Разрабатывать и поддерживать сервисы, отвечающие пользователям на запросы в поддержку\n"
+    "-Разрабатывать HTTP API с использованием FastAPI, Django, SQLAlchemy\n"
+    "-Заниматься профайлингом и оптимизацией производительности сервисов\n"
+    "-Разрабатывать и поддерживать фронтенд административных панелей, используя Django templates\n"
+    "☑️\nНаши пожелания к кандидатам\n"
+    "-Знания python, FastAPI, Django, SQLAlchemy, SQL, Unix/Linux, Docker\n"
+    "-Опыт работы с ClickHouse, PostgreSQL\n"
+    "-Опыт работы с Java Script и умение работать с React SPA (будет плюсом)"
+)
+
+AI_PYTHON_ENGINEER = (
+    "AI Python Engineer\n"
+    "🤗\nAI Python Engineer\nУдаленно (Санкт-Петербург)\nCRT\n"
+    "— IT-компания с 20-летним опытом разработки, понятными процессами и "
+    "профессиональным менеджментом. Мы работаем с разными IT-проектами и базируемся в Тюмени.\n"
+    "Требования:\n— От 3 лет коммерческой разработки на Python и сильный backend-фундамент\n"
+    "— Практический опыт с LLM, RAG или AI-агентами в реальных проектах\n"
+    "— Знание async, типизации, тестирования и разработки REST API\n"
+    "— Опыт работы с FastAPI, Django"
+)
+
+SBER_OFFICE_MOSCOW = (
+    "Python-разработчик\n"
+    "🤨\nPython-разработчик\nОфис (Москва)\nСбербанк\n"
+    "— крупнейший банк в России, Центральной и Восточной Европе.\n"
+    "Требования:\n— опыт промышленной разработки на Python.\n"
+    "— глубокое понимание алгоритмов и структур данных.\n— знание Linux и контейнеризации."
+)
+
+HABR_AQA = (
+    "Требуется «AQA Тестировщик (Python)» (от 75 000 до 90 000 ₽)\n"
+    "Компания «ITK academy» ищет хорошего специалиста на вакансию «AQA Тестировщик (Python)». "
+    "От 75 000 ₽ до 90 000 ₽. Полный рабочий день. Можно удалённо. "
+    "Требуемые навыки: #junior, #Python, #ООП, #Базыданных, #REST, #SQL, #HTTP."
+)
+
+SENIOR_AYA_GAMES = (
+    "Senior Python Developer\n"
+    "Senior Python Developer\nв\nAya Games\n"
+    "— компания-разработчик мобильной MMO RPG Riorise.\n"
+    "Удалённая работа. Гибкий график.\nОписание вакансии на GeekJob.ru"
+)
+
+COURSE_AD = (
+    "Стать специалистом по Data Science всего за 10 недель — это реально!\n"
+    "Если давно смотрите в сторону Data Science, но откладываете старт из-за огромного "
+    "количества технологий — сейчас можно зайти в профессию по-другому. "
+    "Симулейтив запускает интенсивный буткемп по Data Science. "
+    "Стек: Python, Git, продвинутая статистика и A/B-тестирование, Airflow. Ищем тех, кто готов учиться."
+)
+
+
+def test_real_remote_python_vacancies_pass():
+    habr = score_text(HABR_ITK_MOSCOW, now=NOW)
+    assert habr is not None
+    assert habr.remote is True
+    wildberries = score_text(WILDBERRIES_REMOTE, now=NOW)
+    assert wildberries is not None
+    assert wildberries.remote is True
+    assert "fastapi" in wildberries.whitelist_hits
+    engineer = score_text(AI_PYTHON_ENGINEER, now=NOW)
+    assert engineer is not None
+    assert "llm" in engineer.whitelist_hits
+
+
+def test_real_office_tester_senior_and_course_are_rejected():
+    assert score_text(SBER_OFFICE_MOSCOW, now=NOW) is None
+    assert score_text(HABR_AQA, now=NOW) is None
+    assert score_text(SENIOR_AYA_GAMES, now=NOW) is None
+    assert score_text(COURSE_AD, now=NOW) is None
+
+
+def test_location_blocks_only_without_remote():
+    assert score_text("Python разработчик, офис (Москва), fastapi", now=NOW) is None
+    result = score_text("Python разработчик, Москва или дистанционно, fastapi", now=NOW)
+    assert result is not None
+    assert result.remote is True
+
+
+def test_stack_terms_are_checked_only_in_head():
+    tail = "x" * 400 + " react и тестирование"
+    assert score_text(f"Python разработчик fastapi\n{tail}", now=NOW) is not None
+    assert score_text("Python разработчик fastapi\nстек react", now=NOW) is None
+
+
+def test_core_only_needs_role_in_head_and_lider_is_senior():
+    assert score_text("Оффер в IT за 3 дня - да!\nИщем тех, кто знает python", now=NOW) is None
+    result = score_text("Python-разработчик (backend)\nищем в команду", now=NOW)
+    assert result is not None
+    assert result.score == 10
+    assert score_text("MLOps Engineer\nЛидер команды, python, вакансия", now=NOW) is None
+
+
+def test_digest_name_is_per_run(tmp_path, monkeypatch):
+    monkeypatch.setattr("vacancy_hunter.core.digests_dir", lambda: tmp_path)
+    stats = build_stats({"hh": [], "habr": [], "telegram": []}, 0, [], [])
+    moment = datetime(2026, 10, 7, 16, 5)
+    first = write_digest([], stats, now=moment)
+    second = write_digest([], stats, now=moment)
+    later = write_digest([], stats, now=moment + timedelta(hours=4))
+    assert first.name == "digest_2026-10-07_1605.md"
+    assert second.name == "digest_2026-10-07_1605_2.md"
+    assert later.name == "digest_2026-10-07_2005.md"
+    assert len(list(tmp_path.glob("digest_*.md"))) == 3
+
+
+def test_send_retries_once_after_429(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class _Post:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self.ok = status_code == 200
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    replies = [_Post(429, {"parameters": {"retry_after": 3}}), _Post(200), _Post(200)]
+
+    def fake_post(url, data, timeout):
+        calls.append(data["text"])
+        return replies.pop(0)
+
+    monkeypatch.setattr("vacancy_hunter.core.requests.post", fake_post)
+    monkeypatch.setattr("vacancy_hunter.core.time.sleep", sleeps.append)
+    monkeypatch.setattr("vacancy_hunter.core.TELEGRAM_LIMIT", 5)
+    send_telegram("token", "chat", [{"title": "x"}], ["first", "second"])
+    assert calls == ["first", "first", "second"]
+    assert sleeps == [3, 1.0]
 
 
 def test_hh_forbidden_returns_empty(monkeypatch, caplog):
