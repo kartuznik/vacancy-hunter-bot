@@ -10,8 +10,8 @@ from typing import NamedTuple
 
 import requests
 
-from config import get_settings
-from vacancy_hunter.database import SeenStore, default_db_path
+from config import HIDE_DUPLICATES, get_settings
+from vacancy_hunter.database import SeenStore, default_db_path, title_key
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.habr_parser import fetch_habr
 from vacancy_hunter.hh_parser import fetch_hh
@@ -50,12 +50,35 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
     collected, passed, rejected = gather()
     store = SeenStore()
     new_items = unseen(passed, store)
-    selected = new_items if show_all else new_items[:TOP_N]
-    stats = build_stats(collected, rejected, passed, new_items)
+    uniques, duplicates = split_duplicates(new_items, store)
+    selected = uniques if show_all else uniques[:TOP_N]
+    selected_keys = {item["title_key"] for item in selected}
+    duplicates = [
+        item for item in duplicates if item["duplicate_of"][1] is not None or item["title_key"] in selected_keys
+    ]
+    stats = build_stats(collected, rejected, passed, uniques, duplicates)
     for item in selected:
-        store.remember(item["source"], item["url"], item["title"], item["score"])
-    digest_path = write_digest(selected, stats)
-    blocks = telegram_blocks(selected, stats)
+        store.remember(
+            item["source"],
+            item["url"],
+            item["title"],
+            item["score"],
+            title_key=item["title_key"],
+            original_source=source_label(item),
+        )
+    for item in duplicates:
+        store.remember(
+            item["source"],
+            item["url"],
+            item["title"],
+            item["score"],
+            title_key=item["title_key"],
+            is_duplicate=True,
+            original_source=item["duplicate_of"][0],
+        )
+    shown_duplicates = [] if HIDE_DUPLICATES else duplicates
+    digest_path = write_digest(selected, stats, duplicates=shown_duplicates)
+    blocks = telegram_blocks(selected, stats, duplicates=shown_duplicates)
     if notify:
         send_telegram(settings.telegram_bot_token, settings.chat_id, selected, blocks)
     return SearchResult(digest_path, blocks, selected)
@@ -97,6 +120,31 @@ def unseen(items: list[dict], store: SeenStore | None) -> list[dict]:
     return [item for item in items if not store.has(item["source"], item["url"])]
 
 
+def source_label(item: dict) -> str:
+    return str(item.get("channel_name") or item.get("source_type") or item.get("source") or "")
+
+
+def split_duplicates(items: list[dict], store: SeenStore | None) -> tuple[list[dict], list[dict]]:
+    uniques: list[dict] = []
+    duplicates: list[dict] = []
+    first_in_run: dict[str, str] = {}
+    for item in items:
+        enriched = dict(item)
+        key = title_key(enriched.get("title") or "", enriched.get("description") or "")
+        enriched["title_key"] = key
+        original = store.find_original(key) if store is not None else None
+        if original is not None:
+            enriched["duplicate_of"] = original
+            duplicates.append(enriched)
+        elif key in first_in_run:
+            enriched["duplicate_of"] = (first_in_run[key], None)
+            duplicates.append(enriched)
+        else:
+            first_in_run[key] = source_label(enriched)
+            uniques.append(enriched)
+    return uniques, duplicates
+
+
 def apply_filter(collected: dict[str, list[dict]]) -> tuple[list[dict], int]:
     passed: list[dict] = []
     rejected = 0
@@ -123,7 +171,13 @@ def apply_filter(collected: dict[str, list[dict]]) -> tuple[list[dict], int]:
     return passed, rejected
 
 
-def write_digest(items: list[dict], stats, *, now: datetime | None = None) -> Path:
+def write_digest(
+    items: list[dict],
+    stats,
+    *,
+    now: datetime | None = None,
+    duplicates: list[dict] | None = None,
+) -> Path:
     directory = digests_dir()
     directory.mkdir(parents=True, exist_ok=True)
     moment = now or datetime.now()
@@ -133,7 +187,8 @@ def write_digest(items: list[dict], stats, *, now: datetime | None = None) -> Pa
     while path.exists():
         path = directory / f"{stem}_{suffix}.md"
         suffix += 1
-    path.write_text(render_markdown(items, stats, day=moment.date().isoformat()), encoding="utf-8")
+    text = render_markdown(items, stats, day=moment.date().isoformat(), duplicates=duplicates or [])
+    path.write_text(text, encoding="utf-8")
     return path
 
 

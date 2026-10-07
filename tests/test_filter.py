@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import requests
 
-from vacancy_hunter.core import send_telegram, write_digest
-from vacancy_hunter.database import SeenStore, default_db_path
+from vacancy_hunter.core import send_telegram, split_duplicates, write_digest
+from vacancy_hunter.database import SeenStore, content_hash, default_db_path, normalize_title
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.hh_parser import fetch_hh
-from vacancy_hunter.report import build_stats, relevance_label, render_markdown, telegram_blocks
+from vacancy_hunter.report import build_stats, duplicate_note, relevance_label, render_markdown, telegram_blocks
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
@@ -296,6 +297,142 @@ def test_send_retries_once_after_429(monkeypatch):
     send_telegram("token", "chat", [{"title": "x"}], ["first", "second"])
     assert calls == ["first", "first", "second"]
     assert sleeps == [3, 1.0]
+
+
+ROBOTICS_DESCRIPTION = (
+    "Robotics – Software Development Engineer\n"
+    "Amazon is an American technology company operating in e-commerce, cloud computing, "
+    "digital streaming and artificial intelligence. Python, remote."
+)
+
+
+def _vacancy(channel: str, post: int, title: str, description: str) -> dict:
+    return {
+        "source": "telegram",
+        "source_type": "telegram",
+        "channel_name": channel,
+        "url": f"https://t.me/{channel}/{post}",
+        "title": title,
+        "description": description,
+        "score": 20,
+    }
+
+
+def test_normalize_title_unifies_dashes_and_punctuation():
+    assert normalize_title("  Robotics – Software Development Engineer! ") == normalize_title(
+        "Robotics - Software  Development Engineer"
+    )
+    assert normalize_title("Robotics — Software Development Engineer") == "robotics software development engineer"
+
+
+def test_robotics_repost_from_other_channel_is_duplicate(tmp_path):
+    store = SeenStore(tmp_path / "seen.db")
+    first = _vacancy("forpython", 5269, "Robotics – Software Development Engineer", ROBOTICS_DESCRIPTION)
+    uniques, duplicates = split_duplicates([first], store)
+    assert duplicates == []
+    original = uniques[0]
+    store.remember(
+        original["source"], original["url"], original["title"], original["score"],
+        title_key=original["title_key"], original_source="forpython",
+    )
+    repost = _vacancy(
+        "jobforjunior",
+        8533,
+        "Robotics - Software Development Engineer",
+        ROBOTICS_DESCRIPTION.replace("–", "-"),
+    )
+    uniques, duplicates = split_duplicates([repost], store)
+    assert uniques == []
+    assert duplicates[0]["duplicate_of"][0] == "forpython"
+    duplicate = duplicates[0]
+    store.remember(
+        duplicate["source"], duplicate["url"], duplicate["title"], duplicate["score"],
+        title_key=duplicate["title_key"], is_duplicate=True, original_source="forpython",
+    )
+    assert store.count_duplicates() == 1
+    with sqlite3.connect(tmp_path / "seen.db") as connection:
+        row = connection.execute(
+            "SELECT is_duplicate, original_source FROM seen_vacancies WHERE url = ?",
+            ("https://t.me/jobforjunior/8533",),
+        ).fetchone()
+    assert row == (1, "forpython")
+
+
+def test_similar_titles_and_different_descriptions_are_not_duplicates(tmp_path):
+    store = SeenStore(tmp_path / "seen.db")
+    items = [
+        _vacancy("forpython", 1, "Python Developer", "Remote backend, fastapi"),
+        _vacancy("geekjobs", 2, "Python Developer Senior", "Remote backend, fastapi"),
+        _vacancy("pydevjob", 2516, "Python-разработчик", "Офис (Москва) Сбербанк — крупнейший банк в России"),
+        _vacancy("pydevjob", 2523, "Python-разработчик", "от 100 000 до 130 000 ₽ Удаленно (Смоленск) Технолайн"),
+    ]
+    uniques, duplicates = split_duplicates(items, store)
+    assert duplicates == []
+    assert len(uniques) == 4
+
+
+def test_copy_inside_one_run_is_duplicate(tmp_path):
+    store = SeenStore(tmp_path / "seen.db")
+    items = [
+        _vacancy("forpython", 5269, "Robotics – Software Development Engineer", ROBOTICS_DESCRIPTION),
+        _vacancy("jobforjunior", 8533, "Robotics – Software Development Engineer", ROBOTICS_DESCRIPTION),
+    ]
+    uniques, duplicates = split_duplicates(items, store)
+    assert [item["channel_name"] for item in uniques] == ["forpython"]
+    assert duplicates[0]["duplicate_of"] == ("forpython", None)
+    assert duplicate_note(duplicates[0]) == "↩️ Уже видели в канале forpython в этом прогоне"
+
+
+def test_duplicate_note_counts_hours():
+    seen = (NOW - timedelta(hours=5)).isoformat()
+    item = {"duplicate_of": ("forpython", seen)}
+    assert duplicate_note(item, now=NOW) == "↩️ Уже видели в канале forpython 5 ч назад"
+
+
+def test_duplicates_block_and_counter_in_digest():
+    stats = build_stats({"hh": [], "habr": [], "telegram": []}, 0, [], [], [{"x": 1}])
+    duplicate = _vacancy("jobforjunior", 8533, "Robotics – Software Development Engineer", "")
+    duplicate["duplicate_of"] = ("forpython", None)
+    text = render_markdown([], stats, day="2026-10-07", duplicates=[duplicate])
+    assert "## ↩️ Повторы" in text
+    assert "Уже видели в канале forpython в этом прогоне" in text
+    assert "Дубликаты из других каналов: 1" in text
+    blocks = telegram_blocks([], stats, duplicates=[duplicate])
+    assert any("Повторы" in block for block in blocks)
+    assert "Дубликаты из других каналов: 1" in blocks[-1]
+
+
+def test_migration_adds_dedup_columns_to_old_database(tmp_path):
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE seen_vacancies (
+                content_hash TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                seen_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO seen_vacancies VALUES (?, 'telegram', 'https://t.me/a/1', 'Old', 10, '2026-10-01T00:00:00+00:00')",
+            (content_hash("telegram", "https://t.me/a/1"),),
+        )
+    store = SeenStore(path)
+    SeenStore(path)
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(seen_vacancies)")}
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(seen_vacancies)")}
+        row = connection.execute(
+            "SELECT title, title_key, is_duplicate, original_source FROM seen_vacancies WHERE url = 'https://t.me/a/1'"
+        ).fetchone()
+    assert {"title_key", "is_duplicate", "original_source"} <= columns
+    assert "idx_seen_vacancies_title_key" in indexes
+    assert row == ("Old", None, 0, None)
+    assert store.has("telegram", "https://t.me/a/1") is True
 
 
 def test_hh_forbidden_returns_empty(monkeypatch, caplog):

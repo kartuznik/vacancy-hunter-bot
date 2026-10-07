@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html import escape
 
 
@@ -22,6 +23,7 @@ class DigestStats:
     passed: int
     new_count: int
     top: tuple[dict, ...]
+    duplicates: int = 0
 
     @property
     def collected_total(self) -> int:
@@ -41,6 +43,7 @@ def build_stats(
     rejected: int,
     passed: list[dict],
     new_items: list[dict],
+    duplicates: list[dict] | None = None,
 ) -> DigestStats:
     ranked = sorted(passed, key=_sort_key)
     return DigestStats(
@@ -51,10 +54,34 @@ def build_stats(
         passed=len(passed),
         new_count=len(new_items),
         top=tuple(ranked[:3]),
+        duplicates=len(duplicates or []),
     )
 
 
-def render_markdown(items: list[dict], stats: DigestStats, *, day: str) -> str:
+def duplicate_note(item: dict, *, now: datetime | None = None) -> str:
+    channel, seen_at = item.get("duplicate_of") or ("", None)
+    if seen_at is None:
+        return f"↩️ Уже видели в канале {channel} в этом прогоне"
+    try:
+        seen = datetime.fromisoformat(seen_at)
+    except ValueError:
+        return f"↩️ Уже видели в канале {channel}"
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    hours = int((current - seen).total_seconds() // 3600)
+    if hours < 1:
+        return f"↩️ Уже видели в канале {channel} меньше часа назад"
+    return f"↩️ Уже видели в канале {channel} {hours} ч назад"
+
+
+def render_markdown(
+    items: list[dict],
+    stats: DigestStats,
+    *,
+    day: str,
+    duplicates: list[dict] | None = None,
+) -> str:
     lines = [f"# Дайджест вакансий {day}", ""]
     if not items:
         lines.extend(["Новых вакансий нет.", ""])
@@ -68,11 +95,21 @@ def render_markdown(items: list[dict], stats: DigestStats, *, day: str) -> str:
         else:
             for item in payload:
                 lines.extend(_markdown_card(item, "###"))
+    if duplicates:
+        lines.extend(["## ↩️ Повторы", ""])
+        for item in sorted(duplicates, key=_sort_key):
+            title = " ".join((item.get("title") or "").split())
+            lines.append(f"- {title} — {item.get('url')}. {duplicate_note(item)}")
+        lines.append("")
     lines.extend(_markdown_summary(stats))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def telegram_blocks(items: list[dict], stats: DigestStats) -> list[str]:
+def telegram_blocks(
+    items: list[dict],
+    stats: DigestStats,
+    duplicates: list[dict] | None = None,
+) -> list[str]:
     blocks: list[str] = []
     for title, source, payload in _sections(items):
         blocks.append(f"<b>{escape(title)}</b>")
@@ -82,6 +119,12 @@ def telegram_blocks(items: list[dict], stats: DigestStats) -> list[str]:
                 blocks.extend(_telegram_card(item) for item in rows)
         else:
             blocks.extend(_telegram_card(item) for item in payload)
+    if duplicates:
+        lines = ["<b>↩️ Повторы</b>"]
+        for item in sorted(duplicates, key=_sort_key):
+            title = escape(" ".join((item.get("title") or "").split()))
+            lines.append(f"{title} — {escape(item.get('url') or '')}\n{escape(duplicate_note(item))}")
+        blocks.append("\n".join(lines))
     blocks.append(_telegram_summary(stats))
     return blocks
 
@@ -147,6 +190,7 @@ def _markdown_summary(stats: DigestStats) -> list[str]:
         f"- Отсеяно фильтром: {stats.rejected}",
         f"- Прошло фильтр: {stats.passed}",
         f"- Новых: {stats.new_count}",
+        f"- Дубликаты из других каналов: {stats.duplicates}",
         f"- HH.ru — {stats.collected_hh}",
         f"- Habr — {stats.collected_habr}",
         f"- Telegram — {stats.collected_telegram}",
@@ -174,6 +218,7 @@ def _telegram_summary(stats: DigestStats) -> str:
         f"Отсеяно фильтром: {stats.rejected}",
         f"Прошло фильтр: {stats.passed}",
         f"Новых: {stats.new_count}",
+        f"Дубликаты из других каналов: {stats.duplicates}",
         f"HH.ru — {stats.collected_hh}",
         f"Habr — {stats.collected_habr}",
         f"Telegram — {stats.collected_telegram}",

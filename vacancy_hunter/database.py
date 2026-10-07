@@ -10,6 +10,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CHANNEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+TITLE_KEY_DESCRIPTION_CHARS = 200
+_NON_WORD = re.compile(r"[\W_]+")
+_DEDUP_COLUMNS = (
+    ("title_key", "TEXT"),
+    ("is_duplicate", "INTEGER DEFAULT 0"),
+    ("original_source", "TEXT"),
+)
+
+
+def normalize_title(text: str) -> str:
+    lowered = (text or "").lower().replace("ё", "е")
+    return " ".join(_NON_WORD.sub(" ", lowered).split())
+
+
+def title_key(title: str, description: str = "") -> str:
+    head = normalize_title(description)[:TITLE_KEY_DESCRIPTION_CHARS]
+    payload = f"{normalize_title(title)}\n{head}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def default_db_path() -> Path:
@@ -48,19 +66,51 @@ class SeenStore:
             ).fetchone()
         return row is not None
 
-    def remember(self, source: str, url: str, title: str, score: int) -> bool:
+    def remember(
+        self,
+        source: str,
+        url: str,
+        title: str,
+        score: int,
+        *,
+        title_key: str | None = None,
+        is_duplicate: bool = False,
+        original_source: str | None = None,
+    ) -> bool:
         digest = content_hash(source, url)
         seen_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO seen_vacancies
-                    (content_hash, source, url, title, score, seen_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (content_hash, source, url, title, score, seen_at,
+                     title_key, is_duplicate, original_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (digest, source, url, title, score, seen_at),
+                (digest, source, url, title, score, seen_at, title_key, int(is_duplicate), original_source),
             )
             return cursor.rowcount == 1
+
+    def find_original(self, key: str) -> tuple[str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(original_source, source), seen_at
+                FROM seen_vacancies
+                WHERE title_key = ?
+                ORDER BY seen_at
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), str(row[1])
+
+    def count_duplicates(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM seen_vacancies WHERE is_duplicate = 1").fetchone()
+        return int(row[0])
 
     def count_vacancies(self) -> int:
         with self._connect() as connection:
@@ -174,6 +224,13 @@ class SeenStore:
                     seen_at TEXT NOT NULL
                 )
                 """
+            )
+            existing = {row[1] for row in connection.execute("PRAGMA table_info(seen_vacancies)")}
+            for column, kind in _DEDUP_COLUMNS:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE seen_vacancies ADD COLUMN {column} {kind}")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_seen_vacancies_title_key ON seen_vacancies (title_key)"
             )
             connection.execute(
                 """

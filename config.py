@@ -11,6 +11,8 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
+HIDE_DUPLICATES = False
+
 VACANCY_MARKERS: tuple[str, ...] = (
     "вакансия",
     "ищем",
