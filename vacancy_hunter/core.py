@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -16,6 +17,7 @@ from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.habr_parser import fetch_habr
 from vacancy_hunter.hh_parser import fetch_hh
 from vacancy_hunter.report import build_stats, render_markdown, telegram_blocks
+from vacancy_hunter.source_rvc import fetch_rvc
 from vacancy_hunter.tg_scraper import fetch_telegram
 
 logger = logging.getLogger(__name__)
@@ -93,11 +95,15 @@ def gather() -> tuple[dict[str, list[dict]], list[dict], int]:
 
 
 def collect(settings) -> dict[str, list[dict]]:
-    return {
-        "hh": safe("hh", lambda: fetch_hh(settings.hh_queries)),
-        "telegram": safe("telegram", fetch_telegram),
-        "habr": safe("habr", lambda: fetch_habr(settings.habr_rss)),
+    sources = {
+        "hh": lambda: fetch_hh(settings.hh_queries),
+        "telegram": fetch_telegram,
+        "habr": lambda: fetch_habr(settings.habr_rss),
+        "rvc": fetch_rvc,
     }
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {label: pool.submit(safe, label, func) for label, func in sources.items()}
+        return {label: future.result() for label, future in futures.items()}
 
 
 def safe(label: str, func):

@@ -11,6 +11,7 @@ SECTION_ORDER: tuple[tuple[str, str], ...] = (
     ("hh", "🟢 HH.ru"),
     ("habr", "🔵 Habr Career"),
     ("telegram", "🟣 Telegram"),
+    ("rvc", "🟠 RVC"),
 )
 
 
@@ -24,10 +25,11 @@ class DigestStats:
     new_count: int
     top: tuple[dict, ...]
     duplicates: int = 0
+    collected_rvc: int = 0
 
     @property
     def collected_total(self) -> int:
-        return self.collected_hh + self.collected_habr + self.collected_telegram
+        return self.collected_hh + self.collected_habr + self.collected_telegram + self.collected_rvc
 
 
 def relevance_label(score: int) -> str:
@@ -55,6 +57,7 @@ def build_stats(
         new_count=len(new_items),
         top=tuple(ranked[:3]),
         duplicates=len(duplicates or []),
+        collected_rvc=len(collected.get("rvc") or []),
     )
 
 
@@ -132,9 +135,10 @@ def telegram_blocks(
 def _sections(items: list[dict]) -> list[tuple]:
     grouped: dict[str, list[dict]] = {key: [] for key, _title in SECTION_ORDER}
     for item in items:
-        source = item.get("source_type") or item.get("source")
-        if source in grouped:
-            grouped[source].append(item)
+        for source in (item.get("source_type"), item.get("source")):
+            if source in grouped:
+                grouped[source].append(item)
+                break
     sections = []
     for source, title in SECTION_ORDER:
         rows = sorted(grouped[source], key=_sort_key)
@@ -194,6 +198,7 @@ def _markdown_summary(stats: DigestStats) -> list[str]:
         f"- HH.ru — {stats.collected_hh}",
         f"- Habr — {stats.collected_habr}",
         f"- Telegram — {stats.collected_telegram}",
+        f"- RVC — {stats.collected_rvc}",
         "",
         "### Топ-3 по скору",
         "",
@@ -222,6 +227,7 @@ def _telegram_summary(stats: DigestStats) -> str:
         f"HH.ru — {stats.collected_hh}",
         f"Habr — {stats.collected_habr}",
         f"Telegram — {stats.collected_telegram}",
+        f"RVC — {stats.collected_rvc}",
         "",
         "<b>Топ-3 по скору</b>",
     ]
