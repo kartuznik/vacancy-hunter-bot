@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 
+from vacancy_hunter.database import HASH_PREFIX_CHARS, content_hash
+
+FAVORITE_PREFIX = "fav:"
+LABEL_PREFIX = "lbl:"
+DOWNLOAD_PREFIX = "dl:"
+EMPTY_DIGEST_MARKER = "Новых вакансий нет."
 
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     ("hh", "🟢 HH.ru"),
@@ -87,7 +93,7 @@ def render_markdown(
 ) -> str:
     lines = [f"# Дайджест вакансий {day}", ""]
     if not items:
-        lines.extend(["Новых вакансий нет.", ""])
+        lines.extend([EMPTY_DIGEST_MARKER, ""])
     for title, source, payload in _sections(items):
         lines.extend([f"## {title}", ""])
         if source == "telegram":
@@ -122,6 +128,29 @@ def telegram_blocks(
                 blocks.extend(_telegram_card(item) for item in rows)
         else:
             blocks.extend(_telegram_card(item) for item in payload)
+    blocks.extend(telegram_tail_blocks(stats, duplicates))
+    return blocks
+
+
+def telegram_card_messages(items: list[dict]) -> list[tuple[str, dict]]:
+    """Одно сообщение на карточку; заголовки раздела и канала входят в первую карточку."""
+    messages: list[tuple[str, dict]] = []
+    for title, source, payload in _sections(items):
+        header = f"<b>{escape(title)}</b>"
+        groups = payload if source == "telegram" else [(None, payload)]
+        for channel, rows in groups:
+            if channel is not None:
+                header = f"{header}\n<b>{escape(channel)}</b>" if header else f"<b>{escape(channel)}</b>"
+            for item in rows:
+                card = _telegram_card(item)
+                text = f"{header}\n\n{card}" if header else card
+                messages.append((text, card_keyboard(item)))
+                header = ""
+    return messages
+
+
+def telegram_tail_blocks(stats: DigestStats, duplicates: list[dict] | None = None) -> list[str]:
+    blocks: list[str] = []
     if duplicates:
         lines = ["<b>↩️ Повторы</b>"]
         for item in sorted(duplicates, key=_sort_key):
@@ -130,6 +159,19 @@ def telegram_blocks(
         blocks.append("\n".join(lines))
     blocks.append(_telegram_summary(stats))
     return blocks
+
+
+def card_keyboard(item: dict) -> dict:
+    prefix = content_hash(item["source"], item["url"])[:HASH_PREFIX_CHARS]
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⭐", "callback_data": f"{FAVORITE_PREFIX}{prefix}"},
+                {"text": "👍 Релевантно", "callback_data": f"{LABEL_PREFIX}r:{prefix}"},
+                {"text": "👎 Мусор", "callback_data": f"{LABEL_PREFIX}j:{prefix}"},
+            ]
+        ]
+    }
 
 
 def _sections(items: list[dict]) -> list[tuple]:

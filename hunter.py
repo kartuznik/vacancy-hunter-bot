@@ -8,7 +8,15 @@ import logging
 from rich.console import Console
 from rich.table import Table
 
-from vacancy_hunter.core import TOP_N, gather, open_store_if_exists, run_search, split_duplicates, unseen
+from vacancy_hunter.core import (
+    TOP_N,
+    gather,
+    open_store_if_exists,
+    run_search,
+    split_duplicates,
+    unseen,
+    write_export_jsonl,
+)
 from vacancy_hunter.report import duplicate_note, relevance_label
 
 logger = logging.getLogger(__name__)
@@ -17,6 +25,10 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = _parse_args()
+    if args.export:
+        path = write_export_jsonl(args.days)
+        logger.info("Экспорт за %s дн. записан: %s", args.days, path)
+        return
     if args.stats:
         collected, passed, rejected = gather()
         store = open_store_if_exists()
@@ -51,6 +63,17 @@ def _parse_args() -> argparse.Namespace:
         "--no-notify",
         action="store_true",
         help="записать файл и базу без отправки текста в Telegram",
+    )
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="записать JSONL со всеми вакансиями за период в exports/ и выйти",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="период экспорта в днях (по умолчанию 30)",
     )
     return parser.parse_args()
 

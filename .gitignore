@@ -1,6 +1,7 @@
 .env
 data/
 digests/
+exports/
 pycache/
 .venv/
 __pycache__/

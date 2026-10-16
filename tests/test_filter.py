@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -287,16 +288,22 @@ def test_send_retries_once_after_429(monkeypatch):
 
     replies = [_Post(429, {"parameters": {"retry_after": 3}}), _Post(200), _Post(200)]
 
+    markups = []
+
     def fake_post(url, data, timeout):
         calls.append(data["text"])
+        markups.append(data.get("reply_markup"))
         return replies.pop(0)
 
     monkeypatch.setattr("vacancy_hunter.core.requests.post", fake_post)
     monkeypatch.setattr("vacancy_hunter.core.time.sleep", sleeps.append)
-    monkeypatch.setattr("vacancy_hunter.core.TELEGRAM_LIMIT", 5)
-    send_telegram("token", "chat", [{"title": "x"}], ["first", "second"])
+    keyboard = {"inline_keyboard": [[{"text": "⭐", "callback_data": "fav:abc"}]]}
+    send_telegram("token", "chat", [{"title": "x"}], [("first", keyboard), ("second", None)])
     assert calls == ["first", "first", "second"]
     assert sleeps == [3, 1.0]
+    assert json.loads(markups[0]) == keyboard
+    assert markups[1] == markups[0]
+    assert markups[2] is None
 
 
 ROBOTICS_DESCRIPTION = (

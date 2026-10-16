@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -16,7 +20,13 @@ from vacancy_hunter.database import SeenStore, default_db_path, title_key
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.habr_parser import fetch_habr
 from vacancy_hunter.hh_parser import fetch_hh
-from vacancy_hunter.report import build_stats, render_markdown, telegram_blocks
+from vacancy_hunter.report import (
+    EMPTY_DIGEST_MARKER,
+    build_stats,
+    render_markdown,
+    telegram_card_messages,
+    telegram_tail_blocks,
+)
 from vacancy_hunter.source_rvc import fetch_rvc
 from vacancy_hunter.tg_scraper import fetch_telegram
 
@@ -25,11 +35,14 @@ logger = logging.getLogger(__name__)
 TOP_N = 10
 TELEGRAM_LIMIT = 3500
 SEND_PAUSE_SECONDS = 1.0
+EXPORT_FIELDS = ("title", "url", "score", "saved", "label", "seen_at", "source")
+DIGEST_NAME = re.compile(r"^digest_[0-9_-]+\.md$")
+SUMMARY_SOURCES = (("HH.ru", "hh"), ("Habr", "habr"), ("Telegram", "telegram"), ("RVC", "rvc"))
 
 
 class SearchResult(NamedTuple):
     digest_path: Path
-    blocks: list[str]
+    messages: list[tuple[str, dict | None]]
     selected: list[dict]
 
 
@@ -37,20 +50,98 @@ def digests_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "digests"
 
 
-def latest_digest() -> Path | None:
+def _digest_files() -> list[Path]:
     directory = digests_dir()
     if not directory.is_dir():
-        return None
+        return []
     files = [path for path in directory.glob("digest_*.md") if path.is_file()]
-    if not files:
+    return sorted(files, key=lambda path: path.stat().st_mtime)
+
+
+def is_empty_digest(path: Path) -> bool:
+    return EMPTY_DIGEST_MARKER in path.read_text(encoding="utf-8")
+
+
+def latest_digest() -> Path | None:
+    for path in reversed(_digest_files()):
+        if not is_empty_digest(path):
+            return path
+    return None
+
+
+def newest_digest() -> Path | None:
+    files = _digest_files()
+    return files[-1] if files else None
+
+
+def digest_by_name(name: str) -> Path | None:
+    if not DIGEST_NAME.fullmatch(name or ""):
         return None
-    return max(files, key=lambda path: path.stat().st_mtime)
+    directory = digests_dir().resolve()
+    path = (directory / name).resolve()
+    if path.parent != directory or not path.is_file():
+        return None
+    return path
+
+
+def digest_moment(name: str) -> datetime | None:
+    match = re.match(r"^digest_(\d{4}-\d{2}-\d{2})(?:_(\d{4}))?", name)
+    if match is None:
+        return None
+    day, hhmm = match.groups()
+    return datetime.strptime(f"{day} {hhmm or '0000'}", "%Y-%m-%d %H%M")
+
+
+def download_note(latest: Path, newest: Path | None) -> str | None:
+    if newest is None or newest == latest:
+        return None
+    empty_at = digest_moment(newest.name)
+    found_at = digest_moment(latest.name)
+    if empty_at is None or found_at is None:
+        return None
+    when = f"{empty_at:%H:%M}" if empty_at.date() == datetime.now().date() else f"{empty_at:%d.%m %H:%M}"
+    return f"Последний прогон в {when} был пустой, вот находки от {found_at:%d.%m %H:%M}"
+
+
+def parse_digest_summary(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+
+    def number(label: str) -> int:
+        match = re.search(rf"^- {re.escape(label)}: (\d+)", text, re.M)
+        return int(match.group(1)) if match else 0
+
+    by_source = {}
+    for label, key in SUMMARY_SOURCES:
+        match = re.search(rf"^- {re.escape(label)} — (\d+)", text, re.M)
+        if match:
+            by_source[key] = int(match.group(1))
+    moment = digest_moment(path.name)
+    return {
+        "started_at": moment.astimezone().isoformat() if moment else "",
+        "collected_by_source": by_source,
+        "passed": number("Прошло фильтр"),
+        "filtered": number("Отсеяно фильтром"),
+        "new_count": number("Новых"),
+        "duplicates_count": number("Дубликаты из других каналов"),
+        "digest_file": path.name,
+    }
+
+
+def backfill_runs_from_digests(store: SeenStore) -> int:
+    files = sorted(_digest_files(), key=lambda path: (digest_moment(path.name) or datetime.min, path.name))
+    if not files or store.recent_runs(1):
+        return 0
+    return store.backfill_runs([parse_digest_summary(path) for path in files])
 
 
 def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
     settings = get_settings()
-    collected, passed, rejected = gather()
     store = SeenStore()
+    backfill_runs_from_digests(store)
+    run_id = store.start_run()
+    collected, passed, rejected = gather()
+    for item in passed:
+        store.remember_card(item, run_id)
     new_items = unseen(passed, store)
     uniques, duplicates = split_duplicates(new_items, store)
     selected = uniques if show_all else uniques[:TOP_N]
@@ -67,6 +158,7 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
             item["score"],
             title_key=item["title_key"],
             original_source=source_label(item),
+            run_id=run_id,
         )
     for item in duplicates:
         store.remember(
@@ -77,13 +169,29 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
             title_key=item["title_key"],
             is_duplicate=True,
             original_source=item["duplicate_of"][0],
+            run_id=run_id,
         )
     shown_duplicates = [] if HIDE_DUPLICATES else duplicates
     digest_path = write_digest(selected, stats, duplicates=shown_duplicates)
-    blocks = telegram_blocks(selected, stats, duplicates=shown_duplicates)
+    messages = telegram_messages(selected, stats, shown_duplicates)
     if notify:
-        send_telegram(settings.telegram_bot_token, settings.chat_id, selected, blocks)
-    return SearchResult(digest_path, blocks, selected)
+        send_telegram(settings.telegram_bot_token, settings.chat_id, selected, messages)
+    store.finish_run(
+        run_id,
+        collected_by_source={source: len(items) for source, items in collected.items()},
+        passed=len(passed),
+        filtered=rejected,
+        new_count=len(uniques),
+        duplicates_count=len(duplicates),
+        digest_file=digest_path.name,
+    )
+    return SearchResult(digest_path, messages, selected)
+
+
+def telegram_messages(items: list[dict], stats, duplicates: list[dict]) -> list[tuple[str, dict | None]]:
+    messages: list[tuple[str, dict | None]] = list(telegram_card_messages(items))
+    messages.extend((chunk, None) for chunk in chunk_messages(telegram_tail_blocks(stats, duplicates)))
+    return messages
 
 
 def gather() -> tuple[dict[str, list[dict]], list[dict], int]:
@@ -198,7 +306,12 @@ def write_digest(
     return path
 
 
-def send_telegram(token: str, chat_id: str, items: list[dict], blocks: list[str]) -> None:
+def send_telegram(
+    token: str,
+    chat_id: str,
+    items: list[dict],
+    messages: list[tuple[str, dict | None]],
+) -> None:
     if not items:
         logger.info("Новых вакансий нет, Telegram пропущен")
         return
@@ -207,10 +320,13 @@ def send_telegram(token: str, chat_id: str, items: list[dict], blocks: list[str]
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "parse_mode": "HTML", "disable_web_page_preview": "true"}
-    for index, chunk in enumerate(chunk_messages(blocks)):
+    for index, (text, markup) in enumerate(messages):
         if index:
             time.sleep(SEND_PAUSE_SECONDS)
-        if not _post_chunk(url, {**payload, "text": chunk}):
+        data = {**payload, "text": text}
+        if markup is not None:
+            data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+        if not _post_chunk(url, data):
             return
 
 
@@ -257,3 +373,52 @@ def chunk_messages(blocks: list[str]) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def exports_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "exports"
+
+
+def _since(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def export_csv(store: SeenStore, days: int) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=EXPORT_FIELDS)
+    writer.writeheader()
+    for row in store.export_rows(_since(days)):
+        writer.writerow(
+            {
+                "title": row["title"],
+                "url": row["url"],
+                "score": row["score"],
+                "saved": 1 if row["saved_at"] else 0,
+                "label": row["label"] or "",
+                "seen_at": row["seen_at"],
+                "source": row["source"],
+            }
+        )
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def export_records(store: SeenStore, days: int) -> list[dict]:
+    records = []
+    for row in store.export_rows(_since(days)):
+        record = dict(row)
+        record["matched_words"] = json.loads(row["matched_words"]) if row["matched_words"] else []
+        record["has_card"] = bool(row["has_card"])
+        record["saved"] = row["saved_at"] is not None
+        records.append(record)
+    return records
+
+
+def write_export_jsonl(days: int, store: SeenStore | None = None) -> Path:
+    store = store or SeenStore()
+    directory = exports_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"vacancies_{datetime.now():%Y-%m-%d}.jsonl"
+    with path.open("w", encoding="utf-8") as handle:
+        for record in export_records(store, days):
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
