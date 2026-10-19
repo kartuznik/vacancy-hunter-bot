@@ -83,7 +83,43 @@ _ARCHIVE_TABLES = (
     CREATE TABLE IF NOT EXISTS blacklist (
         id INTEGER PRIMARY KEY,
         pattern TEXT NOT NULL UNIQUE COLLATE NOCASE,
-        added_at TEXT NOT NULL
+        added_at TEXT NOT NULL,
+        suggestion_id INTEGER
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS feedback_events (
+        id INTEGER PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        verdict TEXT NOT NULL CHECK (verdict IN ('relevant', 'junk', 'favorite')),
+        reason TEXT CHECK (reason IS NULL OR reason IN ('c', 's', 'g', 't', 'd', 'n')),
+        source TEXT,
+        channel_name TEXT,
+        company TEXT,
+        salary_ceiling INTEGER,
+        title TEXT,
+        created_at TEXT NOT NULL,
+        undone_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS feedback_suggestions (
+        id INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('blacklist', 'min_salary', 'penalty_senior', 'excluded_grade')),
+        payload TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'declined', 'reverted')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS settings_overrides (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        suggestion_id INTEGER,
+        previous_value TEXT,
+        applied_at TEXT NOT NULL
     )
     """,
 )
@@ -334,14 +370,14 @@ class SeenStore:
         with self._connect() as connection:
             return connection.execute("DELETE FROM parked_vacancies").rowcount
 
-    def blacklist_add(self, raw_pattern: str) -> str:
+    def blacklist_add(self, raw_pattern: str, *, suggestion_id: int | None = None) -> str:
         pattern = " ".join(raw_pattern.split())
         if len(pattern) < BLACKLIST_MIN_CHARS:
             return "invalid"
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO blacklist (pattern, added_at) VALUES (?, ?)",
-                (pattern, datetime.now(timezone.utc).isoformat()),
+                "INSERT OR IGNORE INTO blacklist (pattern, added_at, suggestion_id) VALUES (?, ?, ?)",
+                (pattern, datetime.now(timezone.utc).isoformat(), suggestion_id),
             )
             return "added" if cursor.rowcount == 1 else "exists"
 
@@ -385,6 +421,238 @@ class SeenStore:
                 (digest, datetime.now(timezone.utc).isoformat(), note),
             )
             return cursor.rowcount == 1
+
+    def clear_label(self, digest: str, label: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM vacancy_labels WHERE content_hash = ? AND label = ?",
+                (digest, label),
+            )
+
+    def card_snapshot(self, digest: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM vacancy_cards WHERE content_hash = ?", (digest,)).fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT content_hash, source, url, title,
+                           '' AS description, '' AS salary, '' AS channel_name, '' AS company
+                    FROM seen_vacancies WHERE content_hash = ?
+                    """,
+                    (digest,),
+                ).fetchone()
+        return dict(row) if row is not None else None
+
+    def all_cards(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM vacancy_cards ORDER BY seen_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def add_feedback_event(
+        self,
+        *,
+        content_hash: str,
+        verdict: str,
+        reason: str | None,
+        source: str,
+        channel_name: str,
+        company: str,
+        salary_ceiling: int | None,
+        title: str,
+        created_at: str,
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO feedback_events
+                    (content_hash, verdict, reason, source, channel_name, company,
+                     salary_ceiling, title, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    content_hash,
+                    verdict,
+                    reason,
+                    source,
+                    channel_name,
+                    company,
+                    salary_ceiling,
+                    title,
+                    created_at,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def feedback_event(self, event_id: int) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM feedback_events WHERE id = ?", (event_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def feedback_since(self, since_iso: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM feedback_events WHERE created_at >= ? ORDER BY id",
+                (since_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def feedback_recent(self, limit: int) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM feedback_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_junk_without_reason(self, digest: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM feedback_events
+                WHERE content_hash = ? AND verdict = 'junk' AND reason IS NULL AND undone_at IS NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (digest,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_active_junk(self, digest: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM feedback_events
+                WHERE content_hash = ? AND verdict = 'junk' AND undone_at IS NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (digest,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def active_verdict_count(self, digest: str, verdict: str, *, except_id: int | None = None) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM feedback_events
+                WHERE content_hash = ? AND verdict = ? AND undone_at IS NULL AND id != ?
+                """,
+                (digest, verdict, except_id or 0),
+            ).fetchone()
+        return int(row[0])
+
+    def set_event_reason(self, event_id: int, reason: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE feedback_events SET reason = ? WHERE id = ?", (reason, event_id))
+
+    def mark_feedback_undone(self, event_id: int, undone_at: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE feedback_events SET undone_at = ? WHERE id = ? AND undone_at IS NULL",
+                (undone_at, event_id),
+            )
+            return cursor.rowcount == 1
+
+    def insert_suggestion(self, *, kind: str, payload: str, evidence: str, created_at: str) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO feedback_suggestions (kind, payload, evidence, status, created_at)
+                VALUES (?, ?, ?, 'pending', ?)
+                """,
+                (kind, payload, evidence, created_at),
+            )
+            return int(cursor.lastrowid)
+
+    def update_suggestion_evidence(self, suggestion_id: int, evidence: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE feedback_suggestions SET evidence = ? WHERE id = ? AND status = 'pending'",
+                (evidence, suggestion_id),
+            )
+
+    def latest_suggestion(self, kind: str, payload: str, status: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM feedback_suggestions
+                WHERE kind = ? AND payload = ? AND status = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (kind, payload, status),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def suggestion(self, suggestion_id: int) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM feedback_suggestions WHERE id = ?",
+                (suggestion_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def delete_pending(self, suggestion_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM feedback_suggestions WHERE id = ? AND status = 'pending'",
+                (suggestion_id,),
+            )
+
+    def pending_suggestions(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM feedback_suggestions WHERE status = 'pending' ORDER BY id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_suggestion_status(self, suggestion_id: int, status: str, decided_at: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE feedback_suggestions SET status = ?, decided_at = ? WHERE id = ?",
+                (status, decided_at, suggestion_id),
+            )
+
+    def override_map(self) -> dict[str, dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM settings_overrides").fetchall()
+        return {str(row["key"]): dict(row) for row in rows}
+
+    def upsert_override(
+        self,
+        *,
+        key: str,
+        value: str,
+        suggestion_id: int | None,
+        previous_value: str,
+        applied_at: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO settings_overrides (key, value, suggestion_id, previous_value, applied_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    suggestion_id = excluded.suggestion_id,
+                    previous_value = excluded.previous_value,
+                    applied_at = excluded.applied_at
+                """,
+                (key, value, suggestion_id, previous_value, applied_at),
+            )
+
+    def delete_override(self, key: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM settings_overrides WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            connection.execute("DELETE FROM settings_overrides WHERE key = ?", (key,))
+        return dict(row)
+
+    def reset_feedback_journal(self) -> tuple[int, int]:
+        with self._connect() as connection:
+            events = connection.execute("DELETE FROM feedback_events").rowcount
+            suggestions = connection.execute(
+                "DELETE FROM feedback_suggestions WHERE status != 'accepted'"
+            ).rowcount
+        return events, suggestions
 
     def set_label(self, digest: str, label: str) -> None:
         if label not in LABELS:
@@ -588,6 +856,12 @@ class SeenStore:
                 if column not in card_columns:
                     connection.execute(f"ALTER TABLE vacancy_cards ADD COLUMN {column} {kind}")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_vacancy_cards_run_id ON vacancy_cards (run_id)")
+            blacklist_columns = {row[1] for row in connection.execute("PRAGMA table_info(blacklist)")}
+            if "suggestion_id" not in blacklist_columns:
+                connection.execute("ALTER TABLE blacklist ADD COLUMN suggestion_id INTEGER")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_events_created ON feedback_events (created_at)"
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS search_channels (

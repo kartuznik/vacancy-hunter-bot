@@ -15,7 +15,16 @@ from typing import NamedTuple
 
 import requests
 
-from config import HIDE_DUPLICATES, MIN_SALARY_RUB, PARK_DAYS, PARK_FLOOR, PASS_SCORE, get_settings
+from config import (
+    EXCLUDED_GRADES,
+    HIDE_DUPLICATES,
+    MIN_SALARY_RUB,
+    PARK_DAYS,
+    PARK_FLOOR,
+    PASS_SCORE,
+    PENALTY_SENIOR,
+    get_settings,
+)
 from vacancy_hunter.database import SeenStore, default_db_path, title_key
 from vacancy_hunter.filter_and_score import excluded_grade, score_text, senior_penalty
 from vacancy_hunter.salary import parse_salary, salary_below_minimum
@@ -45,6 +54,17 @@ class SearchResult(NamedTuple):
     digest_path: Path
     messages: list[tuple[str, dict | None]]
     selected: list[dict]
+    suggestion_text: str = ""
+
+
+class GateSettings(NamedTuple):
+    min_salary_rub: int
+    penalty_senior: int
+    excluded_grades: tuple[str, ...]
+
+
+def default_gates() -> GateSettings:
+    return GateSettings(MIN_SALARY_RUB, PENALTY_SENIOR, EXCLUDED_GRADES)
 
 
 def digests_dir() -> Path:
@@ -188,7 +208,12 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
         duplicates_count=len(duplicates),
         digest_file=digest_path.name,
     )
-    return SearchResult(digest_path, messages, selected)
+    suggestion_text = _suggestion_text(store)
+    if notify and suggestion_text:
+        if selected:
+            time.sleep(SEND_PAUSE_SECONDS)
+        notify_owner(suggestion_text)
+    return SearchResult(digest_path, messages, selected, suggestion_text)
 
 
 def telegram_messages(items: list[dict], stats, duplicates: list[dict]) -> list[tuple[str, dict | None]]:
@@ -202,7 +227,9 @@ def gather() -> tuple[dict[str, list[dict]], list[dict], int, list[dict]]:
     collected = collect(settings)
     store = open_store_if_exists()
     patterns = store.blacklist_patterns() if store is not None else []
-    passed, rejected, parked = apply_filter(collected, patterns)
+    from vacancy_hunter.feedback import effective_gates
+
+    passed, rejected, parked = apply_filter(collected, patterns, effective_gates(store))
     passed.sort(key=lambda item: (-item["score"], item["title"]))
     return collected, passed, rejected, parked
 
@@ -265,14 +292,16 @@ def split_duplicates(items: list[dict], store: SeenStore | None) -> tuple[list[d
 
 
 def apply_filter(
-    collected: dict[str, list[dict]], blacklist: list[str] | tuple[str, ...] = ()
+    collected: dict[str, list[dict]],
+    blacklist: list[str] | tuple[str, ...] = (),
+    gates: GateSettings | None = None,
 ) -> tuple[list[dict], int, list[dict]]:
     passed: list[dict] = []
     parked: list[dict] = []
     rejected = 0
     for items in collected.values():
         for item in items:
-            verdict, enriched = evaluate(item, blacklist)
+            verdict, enriched = evaluate(item, blacklist, gates)
             if verdict == "pass":
                 passed.append(enriched)
             elif verdict == "park":
@@ -282,17 +311,22 @@ def apply_filter(
     return passed, rejected, parked
 
 
-def evaluate(item: dict, blacklist: list[str] | tuple[str, ...] = ()) -> tuple[str, dict | None]:
+def evaluate(
+    item: dict,
+    blacklist: list[str] | tuple[str, ...] = (),
+    gates: GateSettings | None = None,
+) -> tuple[str, dict | None]:
     """Гейты по порядку: ссылка, блэклист, грейд, зарплата, скоринг, штраф senior, порог."""
+    gates = gates or default_gates()
     if not item.get("url"):
         return "reject", None
     if blacklist_match(item, blacklist) is not None:
         return "reject", None
     title = item.get("title") or ""
-    if excluded_grade(title) is not None:
+    if excluded_grade(title, gates.excluded_grades) is not None:
         return "reject", None
     salary = parse_salary(item)
-    if salary_below_minimum(salary, MIN_SALARY_RUB):
+    if salary_below_minimum(salary, gates.min_salary_rub):
         return "reject", None
     text = "\n".join(
         part for part in (title, item.get("description") or "", item.get("salary") or "") if part
@@ -300,7 +334,7 @@ def evaluate(item: dict, blacklist: list[str] | tuple[str, ...] = ()) -> tuple[s
     scored = score_text(text, item.get("published_at"))
     if scored is None:
         return "reject", None
-    score = scored.score - senior_penalty(title)
+    score = scored.score - senior_penalty(title, gates.penalty_senior)
     if score < PARK_FLOOR:
         return "reject", None
     enriched = dict(item)
@@ -343,6 +377,23 @@ def write_digest(
     text = render_markdown(items, stats, day=moment.date().isoformat(), duplicates=duplicates or [])
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _suggestion_text(store: SeenStore) -> str:
+    from vacancy_hunter.feedback import format_created, refresh_suggestions
+
+    return format_created(store, refresh_suggestions(store))
+
+
+def notify_owner(text: str) -> None:
+    settings = get_settings()
+    if not text or not settings.telegram_bot_token or not settings.chat_id:
+        return
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    _post_chunk(
+        url,
+        {"chat_id": settings.chat_id, "text": text, "disable_web_page_preview": "true"},
+    )
 
 
 def send_telegram(
