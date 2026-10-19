@@ -129,7 +129,7 @@ def test_run_search_records_run_cards_and_seen_run_id(tmp_path, digests, monkeyp
     store = _store(tmp_path)
     monkeypatch.setattr(core, "SeenStore", lambda: store)
     monkeypatch.setattr(core, "get_settings", lambda: type("S", (), {"telegram_bot_token": "", "chat_id": ""})())
-    monkeypatch.setattr(core, "gather", lambda: ({"telegram": [CARD], "habr": [HABR_CARD]}, [CARD, HABR_CARD], 3))
+    monkeypatch.setattr(core, "gather", lambda: ({"telegram": [CARD], "habr": [HABR_CARD]}, [CARD, HABR_CARD], 3, []))
     result = core.run_search(notify=False)
 
     run = store.recent_runs(1)[0]

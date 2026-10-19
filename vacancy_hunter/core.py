@@ -15,9 +15,10 @@ from typing import NamedTuple
 
 import requests
 
-from config import HIDE_DUPLICATES, get_settings
+from config import HIDE_DUPLICATES, MIN_SALARY_RUB, PARK_DAYS, PARK_FLOOR, PASS_SCORE, get_settings
 from vacancy_hunter.database import SeenStore, default_db_path, title_key
-from vacancy_hunter.filter_and_score import score_text
+from vacancy_hunter.filter_and_score import excluded_grade, score_text, senior_penalty
+from vacancy_hunter.salary import parse_salary, salary_below_minimum
 from vacancy_hunter.habr_parser import fetch_habr
 from vacancy_hunter.hh_parser import fetch_hh
 from vacancy_hunter.report import (
@@ -139,7 +140,9 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
     store = SeenStore()
     backfill_runs_from_digests(store)
     run_id = store.start_run()
-    collected, passed, rejected = gather()
+    store.purge_expired_parked()
+    collected, passed, rejected, parked = gather()
+    store.park(parked, PARK_DAYS)
     for item in passed:
         store.remember_card(item, run_id)
     new_items = unseen(passed, store)
@@ -149,7 +152,7 @@ def run_search(notify: bool, *, show_all: bool = False) -> SearchResult:
     duplicates = [
         item for item in duplicates if item["duplicate_of"][1] is not None or item["title_key"] in selected_keys
     ]
-    stats = build_stats(collected, rejected, passed, uniques, duplicates)
+    stats = build_stats(collected, rejected, passed, uniques, duplicates, parked=len(parked))
     for item in selected:
         store.remember(
             item["source"],
@@ -194,12 +197,14 @@ def telegram_messages(items: list[dict], stats, duplicates: list[dict]) -> list[
     return messages
 
 
-def gather() -> tuple[dict[str, list[dict]], list[dict], int]:
+def gather() -> tuple[dict[str, list[dict]], list[dict], int, list[dict]]:
     settings = get_settings()
     collected = collect(settings)
-    passed, rejected = apply_filter(collected)
+    store = open_store_if_exists()
+    patterns = store.blacklist_patterns() if store is not None else []
+    passed, rejected, parked = apply_filter(collected, patterns)
     passed.sort(key=lambda item: (-item["score"], item["title"]))
-    return collected, passed, rejected
+    return collected, passed, rejected, parked
 
 
 def collect(settings) -> dict[str, list[dict]]:
@@ -259,30 +264,64 @@ def split_duplicates(items: list[dict], store: SeenStore | None) -> tuple[list[d
     return uniques, duplicates
 
 
-def apply_filter(collected: dict[str, list[dict]]) -> tuple[list[dict], int]:
+def apply_filter(
+    collected: dict[str, list[dict]], blacklist: list[str] | tuple[str, ...] = ()
+) -> tuple[list[dict], int, list[dict]]:
     passed: list[dict] = []
+    parked: list[dict] = []
     rejected = 0
     for items in collected.values():
         for item in items:
-            if not item.get("url"):
+            verdict, enriched = evaluate(item, blacklist)
+            if verdict == "pass":
+                passed.append(enriched)
+            elif verdict == "park":
+                parked.append(enriched)
+            else:
                 rejected += 1
-                continue
-            text = "\n".join(
-                part
-                for part in (item.get("title") or "", item.get("description") or "", item.get("salary") or "")
-                if part
-            )
-            scored = score_text(text, item.get("published_at"))
-            if scored is None:
-                rejected += 1
-                continue
-            enriched = dict(item)
-            enriched["score"] = scored.score
-            enriched["source_type"] = enriched.get("source_type") or enriched.get("source")
-            enriched["channel_name"] = enriched.get("channel_name") or ""
-            enriched["matched_whitelist_words"] = list(scored.whitelist_hits)
-            passed.append(enriched)
-    return passed, rejected
+    return passed, rejected, parked
+
+
+def evaluate(item: dict, blacklist: list[str] | tuple[str, ...] = ()) -> tuple[str, dict | None]:
+    """Гейты по порядку: ссылка, блэклист, грейд, зарплата, скоринг, штраф senior, порог."""
+    if not item.get("url"):
+        return "reject", None
+    if blacklist_match(item, blacklist) is not None:
+        return "reject", None
+    title = item.get("title") or ""
+    if excluded_grade(title) is not None:
+        return "reject", None
+    salary = parse_salary(item)
+    if salary_below_minimum(salary, MIN_SALARY_RUB):
+        return "reject", None
+    text = "\n".join(
+        part for part in (title, item.get("description") or "", item.get("salary") or "") if part
+    )
+    scored = score_text(text, item.get("published_at"))
+    if scored is None:
+        return "reject", None
+    score = scored.score - senior_penalty(title)
+    if score < PARK_FLOOR:
+        return "reject", None
+    enriched = dict(item)
+    enriched["score"] = score
+    enriched["source_type"] = enriched.get("source_type") or enriched.get("source")
+    enriched["channel_name"] = enriched.get("channel_name") or ""
+    enriched["company"] = enriched.get("company") or ""
+    enriched["matched_whitelist_words"] = list(scored.whitelist_hits)
+    if salary is not None and salary.from_text:
+        enriched["salary"] = salary.text
+        enriched["salary_from_text"] = True
+    return ("pass" if score >= PASS_SCORE else "park"), enriched
+
+
+def blacklist_match(item: dict, patterns: list[str] | tuple[str, ...]) -> str | None:
+    fields = [str(item.get(name) or "").casefold() for name in ("channel_name", "company")]
+    for pattern in patterns:
+        needle = pattern.casefold().strip()
+        if needle and any(needle in field for field in fields):
+            return pattern
+    return None
 
 
 def write_digest(

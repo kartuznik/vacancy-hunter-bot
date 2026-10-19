@@ -39,6 +39,7 @@ from vacancy_hunter.core import (
 )
 from vacancy_hunter.database import SeenStore, default_db_path, normalize_channel
 from vacancy_hunter.health import build_health_report
+from vacancy_hunter.letter import compose_letter
 from vacancy_hunter.report import DOWNLOAD_PREFIX, FAVORITE_PREFIX, LABEL_PREFIX, relevance_label
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ COMMANDS = (
     BotCommand(command="history", description="Последние 10 прогонов"),
     BotCommand(command="saved", description="Избранные вакансии"),
     BotCommand(command="export", description="CSV со всеми вакансиями за период"),
+    BotCommand(command="parked", description="Вакансии на парковке"),
+    BotCommand(command="parked_clear", description="Очистить парковку"),
+    BotCommand(command="blacklist", description="Блэклист: add, remove, list"),
+    BotCommand(command="letter", description="Сопроводительное письмо к вакансии"),
     BotCommand(command="help", description="Справка по командам"),
     BotCommand(command="health", description="Самодиагностика системы"),
     BotCommand(command="stats", description="Статистика поиска"),
@@ -72,6 +77,10 @@ HELP_TEXT = (
     "/history — последние 10 прогонов, тап открывает топ-3 и файл\n"
     "/saved — избранные вакансии\n"
     "/export [дней] — CSV со всеми вакансиями за период, по умолчанию 30 дней\n"
+    "/parked — вакансии на парковке по убыванию скора\n"
+    "/parked_clear — очистить парковку\n"
+    "/blacklist add|remove паттерн, /blacklist list — блэклист компаний и каналов\n"
+    "/letter — список вакансий последнего дайджеста; /letter номер или ссылка — письмо\n"
     "/help — эта справка\n"
     "/health — самодиагностика системы\n"
     "/stats — статистика поиска по базе\n"
@@ -446,6 +455,104 @@ def _channel_list_text() -> str:
     for name, count in rows:
         lines.append(f"• {name} — {count}")
     return "\n".join(lines)
+
+
+@dispatcher.message(Command("parked"))
+async def parked_command(message: Message) -> None:
+    if await _deny(message):
+        return
+    for chunk in await asyncio.to_thread(parked_messages):
+        await answer_with_retry(message, chunk, parse_mode="HTML", disable_web_page_preview=True)
+
+
+def parked_messages(store: SeenStore | None = None) -> list[str]:
+    rows = (store or SeenStore()).parked_list()
+    if not rows:
+        return ["Парковка пуста."]
+    blocks = [f"<b>🅿️ Парковка ({len(rows)})</b>"]
+    for row in rows:
+        title = escape(" ".join((row["title"] or "").split()))
+        salary = escape(row["salary"] or "не указана")
+        expires = datetime.fromisoformat(row["expires_at"]).astimezone()
+        blocks.append(
+            f"<b>{title}</b> — {row['score']}\nЗарплата: {salary}\n{escape(row['url'])}\nдо {expires:%d.%m %H:%M}"
+        )
+    return chunk_messages(blocks)
+
+
+@dispatcher.message(Command("parked_clear"))
+async def parked_clear_command(message: Message) -> None:
+    if await _deny(message):
+        return
+    removed = await asyncio.to_thread(lambda: SeenStore().clear_parked())
+    await message.answer(f"Парковка очищена, удалено записей: {removed}.")
+
+
+@dispatcher.message(Command("blacklist"))
+async def blacklist_command(message: Message) -> None:
+    if await _deny(message):
+        return
+    text = await asyncio.to_thread(blacklist_reply, _command_argument(message.text))
+    await message.answer(text)
+
+
+def blacklist_reply(argument: str, store: SeenStore | None = None) -> str:
+    action, _, pattern = argument.partition(" ")
+    action = action.lower()
+    pattern = pattern.strip()
+    store = store or SeenStore()
+    if action == "list":
+        patterns = store.blacklist_patterns()
+        if not patterns:
+            return "Блэклист пуст."
+        return "Блэклист:\n" + "\n".join(f"• {item}" for item in patterns)
+    if action == "add" and pattern:
+        status = store.blacklist_add(pattern)
+        return {
+            "added": f"Добавлено в блэклист: {pattern}",
+            "exists": f"Уже в блэклисте: {pattern}",
+        }.get(status, "Паттерн должен быть не короче двух символов.")
+    if action == "remove" and pattern:
+        if store.blacklist_remove(pattern):
+            return f"Удалено из блэклиста: {pattern}"
+        return f"Такого паттерна нет: {pattern}"
+    return "Формат: /blacklist add паттерн, /blacklist remove паттерн, /blacklist list"
+
+
+@dispatcher.message(Command("letter"))
+async def letter_command(message: Message) -> None:
+    if await _deny(message):
+        return
+    text = await asyncio.to_thread(letter_reply, _command_argument(message.text))
+    await message.answer(text, disable_web_page_preview=True)
+
+
+def letter_reply(argument: str, store: SeenStore | None = None, settings=None) -> str:
+    cards = (store or SeenStore()).latest_digest_cards()
+    if not cards:
+        return "В последнем дайджесте с находками нет сохранённых карточек."
+    if not argument:
+        lines = ["Вакансии последнего дайджеста. Письмо: /letter номер или /letter ссылка"]
+        for index, card in enumerate(cards, start=1):
+            title = " ".join((card["title"] or "").split())
+            lines.append(f"{index}. {title} — {card['score']}\n{card['url']}")
+        return "\n".join(lines)
+    card = _pick_card(cards, argument)
+    if card is None:
+        return "Вакансия не найдена в последнем дайджесте. Список: /letter"
+    settings = settings or get_settings()
+    result = compose_letter(card, settings.profile_facts, settings.whitelist_links)
+    if result.text is None:
+        return "Письмо не собрано, гвард нашёл нарушения:\n" + "\n".join(f"• {item}" for item in result.violations)
+    return result.text
+
+
+def _pick_card(cards: list[dict], argument: str) -> dict | None:
+    if argument.isdigit():
+        index = int(argument)
+        return cards[index - 1] if 1 <= index <= len(cards) else None
+    wanted = argument.strip().rstrip("/")
+    return next((card for card in cards if (card["url"] or "").rstrip("/") == wanted), None)
 
 
 @dispatcher.message(Command("stats"))

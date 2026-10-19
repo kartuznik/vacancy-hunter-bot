@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CHANNEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
@@ -66,7 +66,29 @@ _ARCHIVE_TABLES = (
         labeled_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS parked_vacancies (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        salary TEXT,
+        score INTEGER NOT NULL,
+        parked_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        UNIQUE (source, url)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS blacklist (
+        id INTEGER PRIMARY KEY,
+        pattern TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        added_at TEXT NOT NULL
+    )
+    """,
 )
+_CARD_COLUMNS = (("company", "TEXT"),)
+BLACKLIST_MIN_CHARS = 2
 
 
 def normalize_title(text: str) -> str:
@@ -228,8 +250,8 @@ class SeenStore:
                 """
                 INSERT OR IGNORE INTO vacancy_cards
                     (content_hash, title, url, description, salary, source, channel_name,
-                     published_at, matched_words, score, seen_at, run_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     published_at, matched_words, score, seen_at, run_id, company)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     content_hash(item["source"], item["url"]),
@@ -244,9 +266,94 @@ class SeenStore:
                     int(item.get("score") or 0),
                     datetime.now(timezone.utc).isoformat(),
                     run_id,
+                    item.get("company") or "",
                 ),
             )
             return cursor.rowcount == 1
+
+    def latest_digest_cards(self) -> list[dict]:
+        """Карточки, показанные в последнем прогоне с новыми вакансиями, по убыванию скора."""
+        with self._connect() as connection:
+            run = connection.execute(
+                "SELECT run_id FROM runs WHERE new_count > 0 AND digest_file IS NOT NULL ORDER BY run_id DESC LIMIT 1"
+            ).fetchone()
+            if run is None:
+                return []
+            rows = connection.execute(
+                """
+                SELECT c.title, c.url, c.salary, c.company, c.source, c.channel_name, c.score
+                FROM seen_vacancies AS v
+                JOIN vacancy_cards AS c ON c.content_hash = v.content_hash
+                WHERE v.run_id = ? AND COALESCE(v.is_duplicate, 0) = 0
+                ORDER BY c.score DESC, c.title
+                """,
+                (int(run[0]),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def park(self, items: list[dict], days: int, *, now: datetime | None = None) -> int:
+        current = now or datetime.now(timezone.utc)
+        expires = current + timedelta(days=days)
+        with self._connect() as connection:
+            cursor = connection.executemany(
+                """
+                INSERT OR IGNORE INTO parked_vacancies
+                    (source, title, url, salary, score, parked_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        item["source"],
+                        item.get("title") or "",
+                        item["url"],
+                        item.get("salary") or "",
+                        int(item.get("score") or 0),
+                        current.isoformat(),
+                        expires.isoformat(),
+                    )
+                    for item in items
+                ],
+            )
+            return cursor.rowcount
+
+    def purge_expired_parked(self, *, now: datetime | None = None) -> int:
+        current = (now or datetime.now(timezone.utc)).isoformat()
+        with self._connect() as connection:
+            return connection.execute("DELETE FROM parked_vacancies WHERE expires_at <= ?", (current,)).rowcount
+
+    def parked_list(self, *, now: datetime | None = None) -> list[dict]:
+        current = (now or datetime.now(timezone.utc)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM parked_vacancies WHERE expires_at > ? ORDER BY score DESC, parked_at DESC",
+                (current,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_parked(self) -> int:
+        with self._connect() as connection:
+            return connection.execute("DELETE FROM parked_vacancies").rowcount
+
+    def blacklist_add(self, raw_pattern: str) -> str:
+        pattern = " ".join(raw_pattern.split())
+        if len(pattern) < BLACKLIST_MIN_CHARS:
+            return "invalid"
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO blacklist (pattern, added_at) VALUES (?, ?)",
+                (pattern, datetime.now(timezone.utc).isoformat()),
+            )
+            return "added" if cursor.rowcount == 1 else "exists"
+
+    def blacklist_remove(self, raw_pattern: str) -> bool:
+        pattern = " ".join(raw_pattern.split())
+        with self._connect() as connection:
+            return connection.execute("DELETE FROM blacklist WHERE pattern = ?", (pattern,)).rowcount == 1
+
+    def blacklist_patterns(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT pattern FROM blacklist ORDER BY pattern COLLATE NOCASE").fetchall()
+        return [str(row[0]) for row in rows]
 
     def top_cards(self, run_id: int, limit: int = 3) -> list[dict]:
         with self._connect() as connection:
@@ -476,6 +583,10 @@ class SeenStore:
             )
             for statement in _ARCHIVE_TABLES:
                 connection.execute(statement)
+            card_columns = {row[1] for row in connection.execute("PRAGMA table_info(vacancy_cards)")}
+            for column, kind in _CARD_COLUMNS:
+                if column not in card_columns:
+                    connection.execute(f"ALTER TABLE vacancy_cards ADD COLUMN {column} {kind}")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_vacancy_cards_run_id ON vacancy_cards (run_id)")
             connection.execute(
                 """

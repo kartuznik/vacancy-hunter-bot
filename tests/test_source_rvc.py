@@ -90,6 +90,7 @@ def test_map_teaser_builds_internal_vacancy() -> None:
         "source": "rvc",
         "source_type": "mcp",
         "channel_name": "",
+        "company": "Acme",
         "id": "acme-python-backend-developer-1",
         "title": "Python Backend Developer",
         "url": TEASER["attributed_url"],

@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 
+from config import FRESH_MAX_MINUTES
 from vacancy_hunter.database import HASH_PREFIX_CHARS, content_hash
 
 FAVORITE_PREFIX = "fav:"
 LABEL_PREFIX = "lbl:"
 DOWNLOAD_PREFIX = "dl:"
 EMPTY_DIGEST_MARKER = "Новых вакансий нет."
+FRESH_MARK = "🆕 свежая"
 
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     ("hh", "🟢 HH.ru"),
@@ -32,6 +34,7 @@ class DigestStats:
     top: tuple[dict, ...]
     duplicates: int = 0
     collected_rvc: int = 0
+    parked: int = 0
 
     @property
     def collected_total(self) -> int:
@@ -52,6 +55,8 @@ def build_stats(
     passed: list[dict],
     new_items: list[dict],
     duplicates: list[dict] | None = None,
+    *,
+    parked: int = 0,
 ) -> DigestStats:
     ranked = sorted(passed, key=_sort_key)
     return DigestStats(
@@ -64,6 +69,7 @@ def build_stats(
         top=tuple(ranked[:3]),
         duplicates=len(duplicates or []),
         collected_rvc=len(collected.get("rvc") or []),
+        parked=parked,
     )
 
 
@@ -183,7 +189,7 @@ def _sections(items: list[dict]) -> list[tuple]:
                 break
     sections = []
     for source, title in SECTION_ORDER:
-        rows = sorted(grouped[source], key=_sort_key)
+        rows = sorted(grouped[source], key=_fresh_key)
         if not rows:
             continue
         if source == "telegram":
@@ -192,7 +198,7 @@ def _sections(items: list[dict]) -> list[tuple]:
                 channel = (item.get("channel_name") or "").strip() or "без канала"
                 by_channel.setdefault(channel, []).append(item)
             channels = [
-                (channel, sorted(channel_rows, key=_sort_key))
+                (channel, sorted(channel_rows, key=_fresh_key))
                 for channel, channel_rows in sorted(by_channel.items(), key=lambda pair: pair[0].casefold())
             ]
             sections.append((title, source, channels))
@@ -203,14 +209,14 @@ def _sections(items: list[dict]) -> list[tuple]:
 
 def _markdown_card(item: dict, heading: str) -> list[str]:
     title = " ".join((item.get("title") or "").split())
-    label = relevance_label(int(item.get("score") or 0))
-    salary = item.get("salary") or "не указана"
+    label = _card_label(item)
     excerpt = ((item.get("description") or "").strip())[:500]
     return [
         f"{heading} {label} {title}",
         "",
         f"- Оценка: {item.get('score')}",
-        f"- Зарплата: {salary}",
+        f"- Зарплата: {salary_display(item)}",
+        f"- Возраст: {age_display(item)}",
         f"- Ссылка: {item.get('url')}",
         f"- {_matches(item)}",
         "",
@@ -221,11 +227,60 @@ def _markdown_card(item: dict, heading: str) -> list[str]:
 
 def _telegram_card(item: dict) -> str:
     title = escape(" ".join((item.get("title") or "").split()))
-    label = escape(relevance_label(int(item.get("score") or 0)))
-    salary = escape(item.get("salary") or "не указана")
+    label = escape(_card_label(item))
+    salary = escape(salary_display(item))
+    age = escape(age_display(item))
     link = escape(item.get("url") or "")
     matches = escape(_matches(item))
-    return f"{label} <b>{title}</b>\nЗарплата: {salary}\nСсылка: {link}\n{matches}"
+    return f"{label} <b>{title}</b>\nЗарплата: {salary}\nВозраст: {age}\nСсылка: {link}\n{matches}"
+
+
+def salary_display(item: dict) -> str:
+    salary = " ".join(str(item.get("salary") or "").split())
+    if not salary:
+        return "не указана"
+    return f"{salary} (из текста)" if item.get("salary_from_text") else salary
+
+
+def age_hours(item: dict, *, now: datetime | None = None) -> int | None:
+    published = _published(item)
+    if published is None:
+        return None
+    current = now or _now()
+    return max(0, int((current - published).total_seconds() // 3600))
+
+
+def is_fresh(item: dict, *, now: datetime | None = None) -> bool:
+    published = _published(item)
+    if published is None:
+        return False
+    return ((now or _now()) - published).total_seconds() < FRESH_MAX_MINUTES * 60
+
+
+def age_display(item: dict, *, now: datetime | None = None) -> str:
+    hours = age_hours(item, now=now)
+    return "неизвестен" if hours is None else f"{hours} ч"
+
+
+def _card_label(item: dict) -> str:
+    label = relevance_label(int(item.get("score") or 0))
+    return f"{FRESH_MARK} · {label}" if is_fresh(item) else label
+
+
+def _published(item: dict) -> datetime | None:
+    value = item.get("published_at")
+    if isinstance(value, str) and value:
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _markdown_summary(stats: DigestStats) -> list[str]:
@@ -237,6 +292,7 @@ def _markdown_summary(stats: DigestStats) -> list[str]:
         f"- Прошло фильтр: {stats.passed}",
         f"- Новых: {stats.new_count}",
         f"- Дубликаты из других каналов: {stats.duplicates}",
+        f"- На парковке: {stats.parked}",
         f"- HH.ru — {stats.collected_hh}",
         f"- Habr — {stats.collected_habr}",
         f"- Telegram — {stats.collected_telegram}",
@@ -266,6 +322,7 @@ def _telegram_summary(stats: DigestStats) -> str:
         f"Прошло фильтр: {stats.passed}",
         f"Новых: {stats.new_count}",
         f"Дубликаты из других каналов: {stats.duplicates}",
+        f"На парковке: {stats.parked}",
         f"HH.ru — {stats.collected_hh}",
         f"Habr — {stats.collected_habr}",
         f"Telegram — {stats.collected_telegram}",
@@ -291,3 +348,9 @@ def _matches(item: dict) -> str:
 
 def _sort_key(item: dict) -> tuple:
     return (-int(item.get("score") or 0), str(item.get("title") or ""))
+
+
+def _fresh_key(item: dict) -> tuple:
+    published = _published(item)
+    stamp = -published.timestamp() if published is not None else 0.0
+    return (published is None, stamp, *_sort_key(item))

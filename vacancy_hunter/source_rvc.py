@@ -69,6 +69,7 @@ def map_teaser(teaser: dict) -> dict | None:
         "source": "rvc",
         "source_type": "mcp",
         "channel_name": "",
+        "company": " ".join(str(teaser.get("company") or "").split()),
         "id": masked_id,
         "title": title,
         "url": url,

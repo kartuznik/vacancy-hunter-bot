@@ -9,10 +9,12 @@ from datetime import datetime, timedelta, timezone
 from config import (
     BLACKLIST_HARD,
     BLACKLIST_LOCATION,
-    BLACKLIST_SENIORITY,
     BLACKLIST_SOFT,
     CORE_PYTHON,
+    EXCLUDED_GRADES,
+    PENALTY_SENIOR,
     ROLE_MARKERS,
+    SENIOR_WORDS,
     VACANCY_MARKERS,
     WHITELIST,
 )
@@ -59,8 +61,6 @@ def score_text(
     head = _head(normalized)
     remote = _REMOTE.search(normalized) is not None
 
-    if _has_any(normalized, BLACKLIST_SENIORITY):
-        return None
     if _has_any(head, BLACKLIST_HARD):
         return None
     if not remote and _has_any(normalized, BLACKLIST_LOCATION):
@@ -99,6 +99,27 @@ def score_text(
         remote=remote,
         fresh=fresh,
     )
+
+
+def excluded_grade(title: str, grades: tuple[str, ...] = EXCLUDED_GRADES) -> str | None:
+    normalized = _normalize(title)
+    for grade in grades:
+        if _grade_pattern(grade).search(normalized):
+            return grade
+    return None
+
+
+def senior_penalty(title: str, penalty: int = PENALTY_SENIOR) -> int:
+    if penalty and _has_any(_normalize(title), SENIOR_WORDS):
+        return penalty
+    return 0
+
+
+def _grade_pattern(term: str) -> re.Pattern[str]:
+    escaped = re.escape(_normalize(term))
+    if re.search(r"[а-яА-Я]", term):
+        return re.compile(rf"(?<![\w]){escaped}", re.IGNORECASE)
+    return re.compile(rf"(?<![\w]){escaped}(?![\w])", re.IGNORECASE)
 
 
 def _head(normalized: str) -> str:

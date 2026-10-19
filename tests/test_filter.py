@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import requests
 
-from vacancy_hunter.core import send_telegram, split_duplicates, write_digest
+from vacancy_hunter.core import evaluate, send_telegram, split_duplicates, write_digest
 from vacancy_hunter.database import SeenStore, content_hash, default_db_path, normalize_title
 from vacancy_hunter.filter_and_score import score_text
 from vacancy_hunter.hh_parser import fetch_hh
@@ -80,9 +80,16 @@ def test_whitelist_bonus_is_per_keyword():
     assert result.score == 30 * 2
 
 
-def test_senior_and_team_lead_are_hard_rejects():
-    assert score_text("Python developer senior fastapi", now=NOW) is None
-    assert score_text("Python developer team lead fastapi", now=NOW) is None
+def _titled(title: str, description: str = "") -> dict:
+    return {"source": "habr", "url": "https://career.habr.com/v/1", "title": title, "description": description}
+
+
+def test_team_lead_in_title_is_rejected_and_senior_is_penalized():
+    assert evaluate(_titled("Python developer team lead fastapi"))[0] == "reject"
+    assert score_text("Python developer senior fastapi", now=NOW).score == 30
+    verdict, item = evaluate(_titled("Python developer senior fastapi удаленно"))
+    assert verdict == "park"
+    assert item["score"] == 30 + 15 - 30
 
 
 def test_soft_hit_is_unique_and_middle_plus_matches():
@@ -130,10 +137,10 @@ def test_stale_vacancy_has_no_fresh_bonus():
     assert result.score == 50
 
 
-def test_news_non_python_and_senior_are_rejected():
+def test_news_non_python_and_senior_core_only_are_rejected():
     assert score_text("Россияне заработали 5 млрд", now=NOW) is None
     assert score_text("postgresql DBA", now=NOW) is None
-    assert score_text("Senior Python Developer", now=NOW) is None
+    assert evaluate(_titled("Senior Python Developer"))[0] == "reject"
 
 
 def test_python_core_without_whitelist_scores_low():
@@ -235,7 +242,8 @@ def test_real_remote_python_vacancies_pass():
 def test_real_office_tester_senior_and_course_are_rejected():
     assert score_text(SBER_OFFICE_MOSCOW, now=NOW) is None
     assert score_text(HABR_AQA, now=NOW) is None
-    assert score_text(SENIOR_AYA_GAMES, now=NOW) is None
+    title, _, description = SENIOR_AYA_GAMES.partition("\n")
+    assert evaluate(_titled(title, description))[0] == "reject"
     assert score_text(COURSE_AD, now=NOW) is None
 
 
@@ -252,12 +260,13 @@ def test_stack_terms_are_checked_only_in_head():
     assert score_text("Python разработчик fastapi\nстек react", now=NOW) is None
 
 
-def test_core_only_needs_role_in_head_and_lider_is_senior():
+def test_core_only_needs_role_in_head_and_lider_in_title_is_rejected():
     assert score_text("Оффер в IT за 3 дня - да!\nИщем тех, кто знает python", now=NOW) is None
     result = score_text("Python-разработчик (backend)\nищем в команду", now=NOW)
     assert result is not None
     assert result.score == 10
-    assert score_text("MLOps Engineer\nЛидер команды, python, вакансия", now=NOW) is None
+    assert evaluate(_titled("Лидер команды Python, вакансия engineer"))[0] == "reject"
+    assert evaluate(_titled("MLOps Engineer", "Лидер команды, python, вакансия, fastapi"))[0] == "pass"
 
 
 def test_digest_name_is_per_run(tmp_path, monkeypatch):

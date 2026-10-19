@@ -56,6 +56,7 @@ def _parse_entry(entry) -> dict | None:
         "source": "habr",
         "source_type": "habr",
         "channel_name": "",
+        "company": (getattr(entry, "author", "") or "").strip(),
         "id": guid,
         "title": title,
         "url": url,

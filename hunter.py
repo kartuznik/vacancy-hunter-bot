@@ -30,7 +30,8 @@ def main() -> None:
         logger.info("Экспорт за %s дн. записан: %s", args.days, path)
         return
     if args.stats:
-        collected, passed, rejected = gather()
+        collected, passed, rejected, parked = gather()
+        logger.info("На парковку ушли бы: %s", len(parked))
         store = open_store_if_exists()
         new_items = unseen(passed, store)
         uniques, duplicates = split_duplicates(new_items, store)

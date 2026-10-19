@@ -92,6 +92,7 @@ def _parse_message(channel: str, message) -> dict | None:
         "source": "telegram",
         "source_type": "telegram",
         "channel_name": channel,
+        "company": "",
         "id": (message.get("data-post") or "").strip(),
         "title": title[:180],
         "url": url,

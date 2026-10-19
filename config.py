@@ -97,17 +97,59 @@ BLACKLIST_LOCATION: tuple[str, ...] = (
     "гибрид",
 )
 
-BLACKLIST_SENIORITY: tuple[str, ...] = (
-    "senior",
-    "сеньор",
+# Грейды, которые отсеиваются по названию вакансии. Латинские слова сравниваются
+# целиком, кириллические записаны основой и ловят любые окончания.
+EXCLUDED_GRADES: tuple[str, ...] = (
     "lead",
-    "team lead",
-    "head",
-    "лидер",
-    "руководитель",
-    "главный",
     "principal",
+    "head",
+    "owner",
+    "director",
+    "руководител",
+    "главн",
+    "лидер",
+    "тимлид",
+    "директор",
 )
+
+# Слова в названии, за которые вычитается PENALTY_SENIOR. 0 выключает штраф.
+SENIOR_WORDS: tuple[str, ...] = ("senior", "сеньор")
+PENALTY_SENIOR = 30
+
+# Зарплатный гейт: известная зарплата строго ниже порога отсеивается до скоринга.
+# Сравнивается верхняя граница вилки, при «от X» — X. 0 выключает гейт.
+MIN_SALARY_RUB = 80_000
+CURRENCY_RATES: dict[str, float] = {"RUB": 1.0, "USD": 95.0, "EUR": 105.0}
+
+# Карточка моложе этого возраста получает пометку «🆕 свежая».
+FRESH_MAX_MINUTES = 240
+
+# Скор не ниже PASS_SCORE проходит в дайджест, от PARK_FLOOR до PASS_SCORE
+# уходит на парковку на PARK_DAYS суток, ниже PARK_FLOOR отсеивается.
+PASS_SCORE = 25
+PARK_FLOOR = 10
+PARK_DAYS = 7
+
+# Заглушки профиля для /letter. Реальные значения задаются в .env:
+# PROFILE_YEARS, PROFILE_STACK, PROFILE_LINKS и WHITELIST_LINKS (через запятую).
+PROFILE_FACTS: dict[str, object] = {
+    "years": "N лет",
+    "stack": "Python",
+    "links": (),
+}
+WHITELIST_LINKS: tuple[str, ...] = ("https://github.com/kartuznik",)
+
+LETTER_TEMPLATE = (
+    "Здравствуйте!\n"
+    "\n"
+    "Меня заинтересовала вакансия «{title}» в {company}.\n"
+    "Опыт разработки на Python: {years}.\n"
+    "Стек: {stack}.\n"
+    "{links}"
+    "\n"
+    "Буду рад обсудить детали."
+)
+LETTER_COMPANY_FALLBACK = "вашей компании"
 
 ROLE_MARKERS: tuple[str, ...] = (
     "разработчик",
@@ -156,6 +198,8 @@ class Settings:
     hh_queries: tuple[str, ...]
     tg_channels: tuple[str, ...]
     habr_rss: str
+    profile_facts: dict
+    whitelist_links: tuple[str, ...]
 
 
 def get_settings() -> Settings:
@@ -166,4 +210,14 @@ def get_settings() -> Settings:
         hh_queries=_split_list(os.environ.get("HH_QUERIES", "")),
         tg_channels=_split_list(os.environ.get("TG_CHANNELS", "")),
         habr_rss=os.environ.get("HABR_RSS", "").strip(),
+        profile_facts=_profile_facts(),
+        whitelist_links=_split_list(os.environ.get("WHITELIST_LINKS", "")) or WHITELIST_LINKS,
     )
+
+
+def _profile_facts() -> dict:
+    return {
+        "years": os.environ.get("PROFILE_YEARS", "").strip() or PROFILE_FACTS["years"],
+        "stack": os.environ.get("PROFILE_STACK", "").strip() or PROFILE_FACTS["stack"],
+        "links": _split_list(os.environ.get("PROFILE_LINKS", "")) or tuple(PROFILE_FACTS["links"]),
+    }
